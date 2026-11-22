@@ -69,6 +69,12 @@ pub struct PlaybackHandle {
 }
 
 impl PlaybackHandle {
+    pub fn attach_synth(&self, synth: Arc<Mutex<SoftSynth>>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.synth = Some(synth);
+        }
+    }
+
     /// Advances browser playback from the iced animation timer. Keeping this on
     /// the UI thread avoids Web Worker/thread requirements on static hosting.
     pub fn poll(&self) {

@@ -14,12 +14,11 @@ pub struct MidiFile {
     pub tracks:         Vec<TrackInfo>,
     pub events:         Vec<TimedEvent>,
     pub notes:          Vec<Note>,
-    /// Monotonic maximum end tick, used to skip expired notes when rendering.
-    pub note_end_prefix: Vec<u64>,
+    pub note_index: crate::note_index::NoteIndex,
     pub total_ticks:    u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TempoChange {
     pub at_tick:         u64,
     pub micros_per_beat: u32,
@@ -34,7 +33,7 @@ pub struct TrackInfo {
     pub channel: Option<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimedEvent {
     pub tick:    u64,
     pub track:   usize,
@@ -42,14 +41,14 @@ pub struct TimedEvent {
     pub kind:    EventKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum EventKind {
     NoteOn  { note: u8, velocity: u8 },
     NoteOff { note: u8 },
 }
 
 /// A fully resolved note with start and end time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Note {
     pub start_tick: u64,
     pub end_tick:   u64,
@@ -71,11 +70,17 @@ pub struct PlayEvent {
 // Load & parse
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
-    // midly borrows from the byte slice; we extract everything into owned types
-    let smf = midly::Smf::parse(bytes).map_err(|e| format!("parse error: {e}"))?;
+    crate::work_budget::complete_immediately(load_bytes_with_budget(bytes, &mut crate::work_budget::WorkBudget::blocking()))
+}
 
-    let ticks_per_beat = match smf.header.timing {
+pub async fn load_bytes_with_budget(bytes: &[u8], budget: &mut crate::work_budget::WorkBudget) -> Result<MidiFile, String> {
+    budget.check_current()?;
+    // Parse lazily rather than retaining a second complete event collection.
+    let (header, source_tracks) = midly::parse(bytes).map_err(|e| format!("parse error: {e}"))?;
+
+    let ticks_per_beat = match header.timing {
         midly::Timing::Metrical(t) => t.as_int(),
         midly::Timing::Timecode(fps, sub) => {
             // Convert SMPTE to approximate ticks/beat (rare in practice)
@@ -92,13 +97,16 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
     let mut time_sig = (4u8, 4u8);
     let mut key_sig = 0i8;
 
-    for (track_idx, track) in smf.tracks.iter().enumerate() {
+    for (track_idx, track) in source_tracks.enumerate() {
+        let track = track.map_err(|e| format!("parse error: {e}"))?;
         let mut abs_tick = 0u64;
         let mut track_name: Option<String> = None;
         let mut track_channel: Option<u8> = None;
 
         for event in track {
-            abs_tick += event.delta.as_int() as u64;
+            let event = event.map_err(|e| format!("parse error: {e}"))?;
+            budget.checkpoint().await?;
+            abs_tick = abs_tick.checked_add(event.delta.as_int() as u64).ok_or("MIDI tick overflow")?;
 
             match event.kind {
                 midly::TrackEventKind::Midi { channel, message } => {
@@ -161,39 +169,30 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
     }
 
     // Sort merged event list by tick; stable so track order is preserved within a tick
-    events.sort_by_key(|e| e.tick);
+    crate::work_budget::sort_by_key(&mut events, |e| e.tick, budget).await?;
 
-    tempo_map.sort_by_key(|t| t.at_tick);
+    crate::work_budget::sort_by_key(&mut tempo_map, |t| t.at_tick, budget).await?;
     if tempo_map.is_empty() {
         tempo_map.push(TempoChange { at_tick: 0, micros_per_beat: 500_000 }); // 120 BPM default
     } else if tempo_map[0].at_tick > 0 {
         tempo_map.insert(0, TempoChange { at_tick: 0, micros_per_beat: 500_000 });
     }
 
-    let total_ticks = events.iter().map(|e| e.tick).max().unwrap_or(0);
+    let total_ticks = events.last().map(|e| e.tick).unwrap_or(0);
 
-    let notes = pair_notes(&events, total_ticks);
-    let note_end_prefix = note_end_prefix(&notes);
+    let notes = pair_notes(&events, total_ticks, budget).await?;
+    let note_index = crate::note_index::NoteIndex::build(&notes, budget).await?;
     let tempo_clock = crate::tempo_clock::TempoClock::new(&tempo_map, ticks_per_beat);
 
-    Ok(MidiFile { ticks_per_beat, tempo_map, tempo_clock, time_sig, key_sig, tracks, events, notes, note_end_prefix, total_ticks })
-}
-
-pub fn note_end_prefix(notes: &[Note]) -> Vec<u64> {
-    let mut end = 0;
-    notes.iter().map(|note| {
-        end = end.max(note.end_tick);
-        end
-    }).collect()
+    budget.check_current()?;
+    Ok(MidiFile { ticks_per_beat, tempo_map, tempo_clock, time_sig, key_sig, tracks, events, notes, note_index, total_ticks })
 }
 
 impl MidiFile {
-    /// Binary-search both ends, retaining sustained notes that began before
-    /// the viewport. No full-song scan for ordinary short-note passages.
+    /// Query overlapping notes without scanning expired history, including
+    /// songs with long sustained notes spanning the visible window.
     pub fn notes_in_window(&self, start: u64, end: u64) -> impl Iterator<Item = &Note> {
-        let first = self.note_end_prefix.partition_point(|&tick| tick < start);
-        let last = self.notes.partition_point(|note| note.start_tick <= end);
-        self.notes[first.min(last)..last].iter().filter(move |note| note.end_tick >= start)
+        self.note_index.query(&self.notes, start, end)
     }
 }
 
@@ -201,13 +200,14 @@ impl MidiFile {
 // Note pairing (NoteOn → NoteOff)
 // ---------------------------------------------------------------------------
 
-fn pair_notes(events: &[TimedEvent], total_ticks: u64) -> Vec<Note> {
+async fn pair_notes(events: &[TimedEvent], total_ticks: u64, budget: &mut crate::work_budget::WorkBudget) -> Result<Vec<Note>, String> {
     // Track identity prevents one track from consuming another's NoteOff.
     // FIFO pairing also preserves repeated, overlapping notes on the same key.
     let mut active: HashMap<(usize, u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
     let mut notes: Vec<Note> = Vec::new();
 
     for ev in events {
+        budget.checkpoint().await?;
         match ev.kind {
             EventKind::NoteOn { note, velocity } => {
                 active.entry((ev.track, ev.channel, note)).or_default().push_back((ev.tick, velocity));
@@ -231,12 +231,13 @@ fn pair_notes(events: &[TimedEvent], total_ticks: u64) -> Vec<Note> {
     // Close any notes that never received a NoteOff
     for ((track, channel, note), pending) in active {
         for (start_tick, velocity) in pending {
+            budget.checkpoint().await?;
             notes.push(Note { start_tick, end_tick: total_ticks, midi_note: note, track, channel, velocity });
         }
     }
 
-    notes.sort_by_key(|n| n.start_tick);
-    notes
+    crate::work_budget::sort_by_key(&mut notes, |n| n.start_tick, budget).await?;
+    Ok(notes)
 }
 
 /// Combines the whole-song octave offset with a track's own octave shift
@@ -254,22 +255,20 @@ pub fn combined_octave_shift(octave_offset: i8, track_octave: &[i8], track: usiz
 /// Returns (offset_in_semitones, notes_covered, total_unique_notes).
 /// The offset should be added to a file MIDI note to get the keyboard MIDI note.
 /// i.e., keyboard_note = file_note + offset  →  key = note_to_key[keyboard_note]
-pub fn best_octave_offset(
+pub async fn best_octave_offset(
     file: &MidiFile,
     keyboard_notes: &HashSet<u8>,
-) -> (i8, usize, usize) {
-    let file_notes: HashSet<u8> = file
-        .events
-        .iter()
-        .filter_map(|e| match e.kind {
-            EventKind::NoteOn { note, .. } => Some(note),
-            _ => None,
-        })
-        .collect();
+    budget: &mut crate::work_budget::WorkBudget,
+) -> Result<(i8, usize, usize), String> {
+    let mut file_notes = HashSet::new();
+    for event in &file.events {
+        if let EventKind::NoteOn { note, .. } = event.kind { file_notes.insert(note); }
+        budget.checkpoint().await?;
+    }
 
     let total = file_notes.len();
     if total == 0 {
-        return (0, 0, 0);
+        return Ok((0, 0, 0));
     }
 
     let mut best = (0i8, 0usize);
@@ -290,7 +289,7 @@ pub fn best_octave_offset(
         }
     }
 
-    (best.0, best.1, total)
+    Ok((best.0, best.1, total))
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +432,7 @@ mod tests {
             end_tick: i * 10 + if i == 40_000 { 100_000 } else { 8 },
             midi_note: 60, track: 0, channel: 0, velocity: 100,
         }).collect();
-        file.note_end_prefix = note_end_prefix(&file.notes);
+        file.note_index = crate::note_index::NoteIndex::new(&file.notes);
         file
     }
 

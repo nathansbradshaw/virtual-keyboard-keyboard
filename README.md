@@ -53,6 +53,12 @@ for long passages; the complete selected sequence remains available internally.
 Extremely dense passages limit the staff to 1,024 visible notes and show a
 notice when additional notes are hidden. This drawing limit does not remove
 notes from the file or change ordinary playback.
+MIDI loading streams events and yields to the browser while parsing, sorting,
+pairing notes, and preparing key mappings. **Cancel load** keeps the current
+song, and a cancelled request cannot replace a newer one. Browser audio starts
+on a musical interaction, so choosing a file does not start its audio scheduler.
+Interval indexing also avoids scanning old notes when a long sustain
+spans the current view.
 
 To compare staff note lookup against a full scan on a 100,000-note fixture:
 

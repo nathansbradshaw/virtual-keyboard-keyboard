@@ -12,6 +12,10 @@ mod render;
 mod staff;
 mod synth;
 mod tempo_clock;
+mod work_budget;
+mod note_index;
+#[cfg(test)]
+mod key_path_tests;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod playback_budget;
 
@@ -141,68 +145,68 @@ impl ControlAssets {
     fn new() -> Self {
         Self {
             rotary_knob_face: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/rotary-knob-face-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/rotary-knob-face-runtime.webp"))[..],
             ),
             fader_cap: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/fader-cap-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/fader-cap-runtime.webp"))[..],
             ),
             fader_track: svg::Handle::from_memory(
                 &include_bytes!("../assets/keyboard/controls/fader-track.svg")[..],
             ),
             led_jewel: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/led-jewel-unlit-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/led-jewel-unlit-runtime.webp"))[..],
             ),
             transport_keycap: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/transport-keycap-photo-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/transport-keycap-photo-runtime.webp")
                 )[..],
             ),
             panel_keycap_wide: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/button-keycap-neutral-v3-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/button-keycap-neutral-v3-runtime.webp")
                 )[..],
             ),
             panel_keycap_square: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/button-keycap-neutral-v3-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/button-keycap-neutral-v3-runtime.webp")
                 )[..],
             ),
             action_keycap_neutral: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/button-keycap-neutral-v3-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/button-keycap-neutral-v3-runtime.webp")
                 )[..],
             ),
             action_keycap_salmon: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/button-keycap-salmon-v3-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/button-keycap-salmon-v3-runtime.webp")
                 )[..],
             ),
             display_bezel: svg::Handle::from_memory(
                 &include_bytes!("../assets/keyboard/controls/display-bezel-wide.svg")[..],
             ),
             rocker_off: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/rocker-switch-off.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/rocker-switch-off.webp"))[..],
             ),
             rocker_on: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/rocker-switch-on.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/rocker-switch-on.webp"))[..],
             ),
             horizontal_switch_off: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/horizontal-switch-off-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/horizontal-switch-off-runtime.webp")
                 )[..],
             ),
             horizontal_switch_on: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/horizontal-switch-on-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/horizontal-switch-on-runtime.webp")
                 )[..],
             ),
             roller_selector: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/roller-selector-inline-photo-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/roller-selector-inline-photo-runtime.webp")
                 )[..],
             ),
             panel_screw: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/controls/panel-screw-photo-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/panel-screw-photo-runtime.webp"))[..],
             ),
             icon_map_rows: svg::Handle::from_memory(
                 &include_bytes!("../assets/keyboard/controls/icon-map-rows.svg")[..],
@@ -224,7 +228,7 @@ impl ControlAssets {
             ),
             label_plate: image::Handle::from_bytes(
                 &include_bytes!(
-                    "../assets/keyboard/controls/track-label-plate-photo-runtime.png"
+                    concat!(env!("OUT_DIR"), "/k2-textures/controls/track-label-plate-photo-runtime.webp")
                 )[..],
             ),
             lcd_glass: svg::Handle::from_memory(
@@ -2139,6 +2143,8 @@ fn midi_input_board_note(note: u8, input_octave: i8) -> (u8, bool) {
 struct App {
     window_size: Size,
     first_frame_pending: bool,
+    load_generation: work_budget::LoadGeneration,
+    loading_midi: bool,
     photo_assets: PhotoBoardAssets,
     chrome_assets: ChromeAssets,
     control_assets: ControlAssets,
@@ -2302,6 +2308,8 @@ impl Default for App {
         let mut app = App {
             window_size: Size::new(1520.0, 900.0),
             first_frame_pending: cfg!(target_arch = "wasm32"),
+            load_generation: work_budget::LoadGeneration::default(),
+            loading_midi: false,
             photo_assets: PhotoBoardAssets::new(),
             chrome_assets: ChromeAssets::new(),
             control_assets: ControlAssets::new(),
@@ -2426,8 +2434,9 @@ pub enum Message {
     ReleaseComputerKeys,
     // file
     OpenFile,
-    FileChosen(Option<Vec<u8>>),
-    MidiLoaded(Result<midi::MidiFile, String>),
+    CancelMidiLoad,
+    FileChosen(work_budget::LoadTicket, Option<Vec<u8>>),
+    MidiLoaded(work_budget::LoadTicket, Result<PreparedMidi, String>),
     // pitch nudge
     PitchUp,
     PitchDown,
@@ -2772,6 +2781,13 @@ fn pick_key_nearest(
 /// dynamic program, not a note-by-note greedy guess. `stages` must be non-empty
 /// and every inner Vec must be non-empty.
 fn shortest_path_keys(stages: &[Vec<KeyId>], key_pos: &HashMap<KeyId, (f32, f32)>) -> Vec<KeyId> {
+    work_budget::complete_immediately(shortest_path_keys_with_budget(stages, key_pos, &mut work_budget::WorkBudget::blocking())).unwrap()
+}
+
+async fn shortest_path_keys_with_budget<S: AsRef<[KeyId]>>(
+    stages: &[S], key_pos: &HashMap<KeyId, (f32, f32)>, budget: &mut work_budget::WorkBudget,
+) -> Result<Vec<KeyId>, String> {
+    if stages.is_empty() { return Ok(Vec::new()); }
     let dist = |a: KeyId, b: KeyId| -> f32 {
         match (key_pos.get(&a), key_pos.get(&b)) {
             (Some(&(c1, r1)), Some(&(c2, r2))) => ((c1 - c2).powi(2) + (r1 - r2).powi(2)).sqrt(),
@@ -2779,34 +2795,79 @@ fn shortest_path_keys(stages: &[Vec<KeyId>], key_pos: &HashMap<KeyId, (f32, f32)
         }
     };
 
-    // dp[i][k] = (cheapest total cost to reach stages[i][k], index into stages[i-1] that got us there)
-    let mut dp: Vec<Vec<(f32, usize)>> = vec![vec![(0.0, 0); stages[0].len()]];
+    // Reuse two cost rows and keep a flat traceback, avoiding an allocation
+    // for every note in a large file.
+    let mut costs = vec![0.0; stages[0].as_ref().len()];
+    let mut next_costs = Vec::new();
+    let mut offsets = Vec::with_capacity(stages.len());
+    let mut history = vec![0; costs.len()];
+    offsets.push(0);
     for i in 1..stages.len() {
-        let row = stages[i]
-            .iter()
-            .map(|&cand| {
-                stages[i - 1]
+        offsets.push(history.len());
+        next_costs.clear();
+        for &cand in stages[i].as_ref() {
+            let (cost, previous) = stages[i - 1].as_ref()
                     .iter()
                     .enumerate()
-                    .map(|(j, &prev)| (dp[i - 1][j].0 + dist(prev, cand), j))
+                    .map(|(j, &prev)| (costs[j] + dist(prev, cand), j))
                     .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .unwrap()
-            })
-            .collect();
-        dp.push(row);
+                    .unwrap();
+            next_costs.push(cost);
+            history.push(previous);
+            budget.checkpoint().await?;
+        }
+        std::mem::swap(&mut costs, &mut next_costs);
     }
 
-    let last = stages.len() - 1;
-    let mut idx = (0..dp[last].len())
-        .min_by(|&a, &b| dp[last][a].0.total_cmp(&dp[last][b].0))
+    let mut idx = (0..costs.len())
+        .min_by(|&a, &b| costs[a].total_cmp(&costs[b]))
         .unwrap();
 
-    let mut chosen = vec![stages[0][0]; stages.len()];
+    let mut chosen = vec![stages[0].as_ref()[0]; stages.len()];
     for i in (0..stages.len()).rev() {
-        chosen[i] = stages[i][idx];
-        idx = dp[i][idx].1;
+        chosen[i] = stages[i].as_ref()[idx];
+        idx = history[offsets[i] + idx];
+        budget.checkpoint().await?;
     }
-    chosen
+    Ok(chosen)
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedMidi {
+    file: Arc<midi::MidiFile>,
+    offset: i8,
+    skipped: usize,
+    closest: HashMap<u8, KeyId>,
+}
+
+async fn prepare_midi(
+    bytes: Vec<u8>, ticket: work_budget::LoadTicket, keyboard_notes: HashSet<u8>,
+    note_keys: HashMap<u8, Vec<KeyId>>, positions: HashMap<KeyId, (f32, f32)>,
+) -> Result<PreparedMidi, String> {
+    let mut budget = work_budget::WorkBudget::loading(ticket);
+    let file = midi::load_bytes_with_budget(&bytes, &mut budget).await?;
+    // At most 128 unique pitches participate in octave selection.
+    let (offset, covered, total) = midi::best_octave_offset(&file, &keyboard_notes, &mut budget).await?;
+    let mut pitches = Vec::new();
+    let mut stages = Vec::new();
+    for note in &file.notes {
+        if note.channel != synth::DRUM_CHANNEL {
+            let shifted = (note.midi_note as i16 + offset as i16).clamp(0, 127) as u8;
+            if let Some(keys) = note_keys.get(&shifted) {
+                pitches.push(shifted);
+                stages.push(keys.as_slice());
+            }
+        }
+        budget.checkpoint().await?;
+    }
+    let path = shortest_path_keys_with_budget(&stages, &positions, &mut budget).await?;
+    let mut closest = HashMap::new();
+    for (pitch, key) in pitches.into_iter().zip(path) {
+        closest.insert(pitch, key);
+        budget.checkpoint().await?;
+    }
+    budget.check_current()?;
+    Ok(PreparedMidi { file: Arc::new(file), offset, skipped: total.saturating_sub(covered), closest })
 }
 
 /// Converts the actual note-on ticks assigned to each highlighted key into
@@ -2885,6 +2946,9 @@ impl App {
                 self.soft_synth = Some(synth);
                 self._audio_stream = Some(stream);
                 self.audio_error = None;
+                if let (Some(handle), Some(synth)) = (&self.playback_handle, &self.soft_synth) {
+                    handle.attach_synth(Arc::clone(synth));
+                }
                 // The synth is created fresh here, well after any
                 // URL-restored waveform/knob settings were applied to
                 // `self` — push them in now so it doesn't silently start
@@ -3712,8 +3776,9 @@ impl App {
 
             // ── File loading ──────────────────────────────────────────────
             Message::OpenFile => {
-                #[cfg(target_arch = "wasm32")]
-                self.ensure_web_audio();
+                let ticket = self.load_generation.begin();
+                self.loading_midi = true;
+                self.load_error = None;
                 Task::perform(
                     async {
                         let handle = rfd::AsyncFileDialog::new()
@@ -3725,24 +3790,34 @@ impl App {
                             None => None,
                         }
                     },
-                    Message::FileChosen,
+                    move |bytes| Message::FileChosen(ticket.clone(), bytes),
                 )
             }
 
-            Message::FileChosen(None) => Task::none(),
-            Message::FileChosen(Some(bytes)) => {
-                Task::perform(async move { midi::load_bytes(&bytes) }, Message::MidiLoaded)
+            Message::CancelMidiLoad => {
+                self.load_generation.begin();
+                self.loading_midi = false;
+                Task::none()
             }
-
-            Message::MidiLoaded(Err(e)) => {
+            Message::FileChosen(ticket, bytes) => {
+                if !ticket.is_current() { return Task::none(); }
+                let Some(bytes) = bytes else { self.loading_midi = false; return Task::none(); };
+                let notes = self.keyboard_notes.clone();
+                let keys = self.note_to_all_keys.clone();
+                let positions = self.key_pos.clone();
+                let result_ticket = ticket.clone();
+                Task::perform(prepare_midi(bytes, ticket, notes, keys, positions), move |result| Message::MidiLoaded(result_ticket.clone(), result))
+            }
+            Message::MidiLoaded(ticket, _) if !ticket.is_current() => Task::none(),
+            Message::MidiLoaded(_, Err(e)) => {
+                self.loading_midi = false;
                 self.load_error = Some(e);
                 Task::none()
             }
-            Message::MidiLoaded(Ok(file)) => {
-                let file = Arc::new(file);
-                let (offset, covered, total) =
-                    midi::best_octave_offset(&file, &self.keyboard_notes);
-                self.skipped_notes = total.saturating_sub(covered);
+            Message::MidiLoaded(_, Ok(prepared)) => {
+                self.loading_midi = false;
+                let PreparedMidi { file, offset, skipped, closest } = prepared;
+                self.skipped_notes = skipped;
                 self.octave_offset = offset;
                 self.track_muted = vec![false; file.tracks.len()];
                 self.track_channel = file.tracks.iter().map(|t| t.channel.unwrap_or(0)).collect();
@@ -3785,8 +3860,9 @@ impl App {
                 self.playback_handle = Some(handle);
                 self.midi_file = Some(file);
                 self.sync_loop_range();
-                self.rebuild_closest_key_map();
-                self.rebuild_all_notes_cache();
+                self.closest_key_for_note = closest;
+                self.all_notes_cache.clear();
+                if self.show_all_notes { self.rebuild_all_notes_cache(); }
                 Task::none()
             }
 
@@ -3911,6 +3987,10 @@ impl App {
 
             // ── Transport ──────────────────────────────────────────────────
             Message::Play => {
+                #[cfg(target_arch = "wasm32")]
+                if self.audio_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.ensure_web_audio();
+                }
                 if let Some(ref h) = self.playback_handle {
                     h.cmd_tx.send(PlayCmd::Play).ok();
                     self.play_state = PlayState::Playing;
@@ -4082,6 +4162,8 @@ impl App {
                 let was = self
                     .audio_enabled
                     .fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(target_arch = "wasm32")]
+                if !was { self.ensure_web_audio(); }
                 if let Some(ref h) = self.playback_handle {
                     h.cmd_tx.send(PlayCmd::SetAudio(!was)).ok();
                 } else if was {
@@ -4397,9 +4479,9 @@ impl App {
         // ── Header: identity, file, metadata and pitch mapping ──────────────
         let open_btn = action_key(
             &self.control_assets,
-            "Open MIDI",
+            if self.loading_midi { "Cancel load" } else { "Open MIDI" },
             true,
-            Some(Message::OpenFile),
+            Some(if self.loading_midi { Message::CancelMidiLoad } else { Message::OpenFile }),
             142.0,
         );
 
@@ -4423,7 +4505,10 @@ impl App {
         } else {
             "READY"
         };
-        let meta: Element<Message> = if let Some(ref e) = self.load_error {
+        let meta: Element<Message> = if self.loading_midi {
+            container(lcd_segment("FILE", "LOADING".to_string()))
+                .padding(lcd_padding).width(Length::Fill).style(lcd_style).into()
+        } else if let Some(ref e) = self.load_error {
             container(
                 text(format!("ERROR · {e}"))
                     .size(15)
@@ -4937,7 +5022,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         let audio_available = self.soft_synth.is_some();
         #[cfg(target_arch = "wasm32")]
-        let audio_available = self.soft_synth.is_some() || self.web_midi_output.is_some();
+        let audio_available = self.audio_error.is_none() || self.web_midi_output.is_some();
         let sound_on = self.audio_error.is_none()
             && self
                 .audio_enabled

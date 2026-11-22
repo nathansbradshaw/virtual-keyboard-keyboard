@@ -35,7 +35,7 @@ impl PhotoBoardAssets {
             // to one small PNG decode avoids blocking WASM startup on a 1024px
             // resize while retaining the master asset for future exports.
             knob_face: handle(
-                &include_bytes!("../assets/keyboard/controls/rotary-knob-face-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/controls/rotary-knob-face-runtime.webp"))[..],
             ),
             key_sprites: RefCell::new(HashMap::new()),
         }
@@ -2127,6 +2127,7 @@ fn draw_knob_pointer(frame: &mut Frame, rect: Rectangle, value: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!(concat!(env!("OUT_DIR"), "/k2_runtime_textures.rs"));
 
     #[test]
     fn huge_play_order_badges_have_bounded_text_without_losing_the_count() {
@@ -2138,16 +2139,9 @@ mod tests {
 
     #[test]
     fn startup_textures_keep_dimensions_and_transparency() {
-        let textures: [(&str, &[u8]); 5] = [
-            ("wood-grain", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/wood-grain.webp"))),
-            ("dark-panel-grain", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/dark-panel-grain.webp"))),
-            ("keyboard-clean-mask", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/keyboard-clean-mask.webp"))),
-            ("led-panel-board-crop", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/led-panel-board-crop.webp"))),
-            ("panel-wear-overlay-runtime", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/panel-wear-overlay-runtime.webp"))),
-        ];
         let mut original_bytes = 0;
         let mut runtime_bytes = 0;
-        for (name, bytes) in textures {
+        for &(name, bytes) in RUNTIME_TEXTURES {
             let source = std::fs::read(format!("assets/keyboard/{name}.png")).unwrap();
             original_bytes += source.len();
             runtime_bytes += bytes.len();
