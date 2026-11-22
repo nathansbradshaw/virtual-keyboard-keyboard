@@ -98,6 +98,31 @@ Firefox uses a stricter permission flow: connect the MIDI device before starting
 Firefox, then approve the site-specific MIDI permission add-on when prompted.
 Firefox for Android does not support Web MIDI.
 
+## Play with Synthphone E
+
+Click **Play with Synthphone** to open both instruments together, or open the
+[paired view](https://nathansbradshaw.github.io/k2-midi-viewer/?duet=1).
+
+1. **Power on** the phone. K2 shows **SYNTHPHONE: ON** once it connects.
+2. Play K2's keys or load a MIDI file in K2. Its transport, track mutes,
+   channel controls and octave settings now drive the phone.
+3. For vocals, enable **MIC** on the phone and lift its receiver. Its screen,
+   keypad, dials and vocal effects remain independently playable.
+
+Channels keep the real phone's meanings: **2 = synth**, **1 = vocal control**,
+**10 = drums**. K2's live keys default to channel 2. For a MIDI file whose
+melody is on channel 1, set that track's **CH** to **2** to hear its synth.
+
+K2's local synth stays silent while Synthphone is selected. Click the
+**SYNTHPHONE** button to switch back; playback pauses during the switch.
+Hardware MIDI output remains independent. No Web MIDI permission or virtual
+MIDI driver is needed for the app-to-app connection. Microphone permission is
+requested only by the phone's MIC button. Both apps process audio locally.
+
+The paired view uses the existing virtual phone, including its firmware and
+audio limitations. This connection does not establish microphone latency or
+physical-device parity. Narrow screens stack the two instruments vertically.
+
 ## Key-image annotations
 
 Annotated copies let the renderer extract precise key and label geometry. All

@@ -1,0 +1,28 @@
+<style>
+  :root { color-scheme: dark; font: 16px/1.4 system-ui, sans-serif; color: #eee7da; background: #151512; }
+  * { box-sizing: border-box; }
+  body { margin: 0; overflow: hidden; }
+  .duet { display: grid; height: 100dvh; grid-template-rows: auto minmax(0, 1fr); }
+  .duet header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; padding: 12px 20px; background: #20211c; border-bottom: 1px solid #494a3d; }
+  .duet h1 { font-size: 18px; margin: 0; }
+  .duet p { margin: 0; }
+  .duet a { color: #edc77c; }
+  .duet .help { font-size: 14px; flex: 1; }
+  .instruments { display: grid; min-height: 0; grid-template-columns: minmax(0, 3fr) minmax(380px, 2fr); }
+  .instruments section { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+  .instruments section + section { border-left: 1px solid #494a3d; }
+  .instrument-label { padding: 7px 14px; font-size: 14px; background: #131510; }
+  iframe { width: 100%; height: 100%; border: 0; background: #151512; }
+  @media(max-width: 1000px) { .duet .help { flex-basis: 100%; order: 2; } .duet header > a { margin-left: auto; } .instruments { grid-template-columns: 1fr; grid-template-rows: minmax(700px, 80dvh) minmax(600px, 80dvh); overflow-y: auto; } .instruments section + section { border-left: 0; border-top: 1px solid #494a3d; } }
+</style>
+<main class="duet">
+  <header>
+    <h1>K2 + Synthphone E</h1>
+    <div class="help"><p id="pair-status" role="status">Power on the phone to connect.</p><p>Play K2 or load MIDI · CH 2: synth · CH 1: vocals · CH 10: drums. Enable MIC and lift the receiver to sing.</p></div>
+    <a id="back" href="./">K2 only</a>
+  </header>
+  <div class="instruments">
+    <section aria-label="K2 keyboard"><div class="instrument-label">K2 · MIDI keyboard &amp; player</div><iframe id="k2" title="K2 MIDI keyboard and player" allow="midi; autoplay"></iframe></section>
+    <section aria-label="Synthphone E"><div class="instrument-label">Synthphone E · instrument &amp; vocal effects</div><iframe id="phone" title="Virtual Synthphone E" allow="microphone; midi; autoplay"></iframe></section>
+  </div>
+</main>

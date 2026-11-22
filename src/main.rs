@@ -11,6 +11,10 @@ mod playback;
 mod render;
 mod staff;
 mod synth;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod duet_protocol;
+#[cfg(target_arch = "wasm32")]
+mod duet;
 mod tempo_clock;
 mod work_budget;
 mod note_index;
@@ -1895,6 +1899,8 @@ fn toggled_style(_: &Theme, status: button::Status) -> button::Style {
 fn main() -> iced::Result {
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
+    #[cfg(target_arch = "wasm32")]
+    if duet::start_shell() { return Ok(()); }
 
     let app = iced::application(App::default, App::update, App::view)
         .title("K2 MIDI Viewer")
@@ -2275,6 +2281,8 @@ struct App {
     /// forwarded byte-for-byte to the selected output before visualization.
     #[cfg(target_arch = "wasm32")]
     web_midi_thru_enabled: bool,
+    #[cfg(target_arch = "wasm32")]
+    duet_ready: bool,
 
     // staff selection
     staff_selection: Option<(u64, u64)>,
@@ -2287,6 +2295,8 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        duet::init();
         let layout = build_layout();
         let midi_port_names = playback::list_output_ports();
         #[cfg(not(target_arch = "wasm32"))]
@@ -2369,6 +2379,8 @@ impl Default for App {
 
             midi_port_idx: 0,
             midi_port_names,
+            #[cfg(target_arch = "wasm32")]
+            duet_ready: false,
 
             #[cfg(target_arch = "wasm32")]
             web_midi_access: None,
@@ -2406,6 +2418,11 @@ impl Default for App {
             selection_play_order: HashMap::new(),
             selection_summary_cache: None,
         };
+        #[cfg(target_arch = "wasm32")]
+        if duet::embedded() {
+            app.keyboard_hits_enabled = true;
+            app.compact_keyboard = true;
+        }
         apply_url_settings(&mut app);
         app
     }
@@ -2462,6 +2479,10 @@ pub enum Message {
     SpeedChanged(f32),
     // audio
     ToggleAudio,
+    #[cfg(target_arch = "wasm32")]
+    Synthphone,
+    #[cfg(target_arch = "wasm32")]
+    SynthphoneTick,
     // port
     NextPort,
     #[cfg(target_arch = "wasm32")]
@@ -2934,6 +2955,7 @@ fn next_web_midi_port(current: Option<&str>, ports: &[playback::MidiPortInfo]) -
 impl App {
     #[cfg(target_arch = "wasm32")]
     fn ensure_web_audio(&mut self) {
+        if duet::selected() { return; }
         if self._audio_stream.is_some() {
             return;
         }
@@ -3098,6 +3120,9 @@ impl App {
     /// understands the subset needed to animate keys and drive the soft synth.
     #[cfg(target_arch = "wasm32")]
     fn forward_web_midi_thru(&mut self, data: &[u8]) {
+        if self.audio_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            duet::send(data);
+        }
         if !self.web_midi_thru_enabled {
             return;
         }
@@ -3151,6 +3176,7 @@ impl App {
                 if self
                     .audio_enabled
                     .load(std::sync::atomic::Ordering::Relaxed)
+                    && !duet::selected()
                 {
                     if let Some(ref synth) = self.soft_synth {
                         if let Ok(mut synth) = synth.lock() {
@@ -3197,6 +3223,7 @@ impl App {
             .filter(|(active_channel, _)| channel.is_none_or(|channel| *active_channel == channel))
             .collect();
         for (active_channel, note) in notes {
+            duet::send(&[0x80 | active_channel, note, 0]);
             if let Some(ref synth) = self.soft_synth {
                 if let Ok(mut synth) = synth.lock() {
                     synth.note_off(note, active_channel);
@@ -3575,9 +3602,13 @@ impl App {
                         .ok();
                 } else {
                     #[cfg(target_arch = "wasm32")]
-                    if let Some(ref output) = self.web_midi_output {
-                        let _ = output.send(&[0x90 | (channel & 0x0F), shifted, 108]);
-                        return;
+                    {
+                        let remote = duet::send(&[0x90 | (channel & 0x0F), shifted, 108]);
+                        if let Some(ref output) = self.web_midi_output {
+                            let _ = output.send(&[0x90 | (channel & 0x0F), shifted, 108]);
+                            return;
+                        }
+                        if remote { return; }
                     }
                     if let Some(ref synth) = self.soft_synth {
                         if let Ok(mut synth) = synth.lock() {
@@ -3599,9 +3630,13 @@ impl App {
                 h.cmd_tx.send(PlayCmd::LiveNoteOff(note, channel)).ok();
             } else {
                 #[cfg(target_arch = "wasm32")]
-                if let Some(ref output) = self.web_midi_output {
-                    let _ = output.send(&[0x80 | (channel & 0x0F), note, 0]);
-                    return;
+                {
+                    let remote = duet::send(&[0x80 | (channel & 0x0F), note, 0]);
+                    if let Some(ref output) = self.web_midi_output {
+                        let _ = output.send(&[0x80 | (channel & 0x0F), note, 0]);
+                        return;
+                    }
+                    if remote { return; }
                 }
                 if let Some(ref synth) = self.soft_synth {
                     if let Ok(mut synth) = synth.lock() {
@@ -3662,6 +3697,32 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            #[cfg(target_arch = "wasm32")]
+            Message::Synthphone => {
+                if !duet::embedded() { duet::open(); return Task::none(); }
+                if let Some(ref h) = self.playback_handle { h.cmd_tx.send(PlayCmd::Pause).ok(); }
+                self.play_state = PlayState::Paused;
+                self.release_computer_keys();
+                if let Some(ref synth) = self.soft_synth {
+                    if let Ok(mut synth) = synth.lock() { synth.all_notes_off(); }
+                }
+                duet::toggle();
+                if !duet::selected() { self.ensure_web_audio(); }
+                self.duet_ready = false;
+                Task::none()
+            }
+            #[cfg(target_arch = "wasm32")]
+            Message::SynthphoneTick => {
+                duet::heartbeat();
+                let ready = duet::ready();
+                if ready != self.duet_ready {
+                    self.duet_ready = ready;
+                    if ready && self.play_state == PlayState::Playing {
+                        if let Some(ref h) = self.playback_handle { h.cmd_tx.send(PlayCmd::SeekTo(self.position_tick)).ok(); }
+                    }
+                }
+                Task::none()
+            }
             Message::FirstFrame => {
                 self.first_frame_pending = false;
                 boot::notify_first_frame();
@@ -4164,6 +4225,8 @@ impl App {
                     .fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                 #[cfg(target_arch = "wasm32")]
                 if !was { self.ensure_web_audio(); }
+                #[cfg(target_arch = "wasm32")]
+                if was { duet::all_notes_off(); }
                 if let Some(ref h) = self.playback_handle {
                     h.cmd_tx.send(PlayCmd::SetAudio(!was)).ok();
                 } else if was {
@@ -4373,6 +4436,12 @@ impl App {
 
         Subscription::batch([
             playback,
+            {
+                #[cfg(target_arch = "wasm32")]
+                { if duet::embedded() { iced::time::every(std::time::Duration::from_millis(1000)).map(|_| Message::SynthphoneTick) } else { Subscription::none() } }
+                #[cfg(not(target_arch = "wasm32"))]
+                { Subscription::none() }
+            },
             if self.first_frame_pending {
                 iced::window::frames().map(|_| Message::FirstFrame)
             } else {
@@ -4439,7 +4508,11 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let has_file = self.midi_file.is_some();
-        let dense_desktop = self.window_size.width >= 1180.0;
+        #[cfg(target_arch = "wasm32")]
+        let paired = duet::embedded();
+        #[cfg(not(target_arch = "wasm32"))]
+        let paired = false;
+        let dense_desktop = self.window_size.width >= 1180.0 || paired;
         let (outer_pad, section_gap, panel_v, panel_h, row_gap, track_gap) =
             if self.window_size.width < 1200.0 {
                 (4.0, 4.0, 5.0, 6.0, 5.0, 8.0)
@@ -4838,7 +4911,11 @@ impl App {
             .spacing(row_gap)
             .align_y(Alignment::Center);
         #[cfg(target_arch = "wasm32")]
-        let midi_controls = row![web_midi_controls, live_channel_btn, open_btn]
+        let midi_controls = row![
+            action_key(&self.control_assets,
+                if !duet::embedded() { "Play with Synthphone" } else if !duet::selected() { "SYNTHPHONE: OFF" } else if self.duet_ready { "SYNTHPHONE: ON" } else { "SYNTHPHONE: WAIT" },
+                duet::selected(), Some(Message::Synthphone), 170.0),
+            web_midi_controls, live_channel_btn, open_btn]
             .spacing(row_gap)
             // Connected MIDI controls may grow a real status row. Align the
             // three chassis at their top edge instead of recentering the two
@@ -5316,8 +5393,8 @@ impl App {
             ((shell_width - outer_pad * 2.0 - CHROME_BEZEL * 2.0) / BOARD_ASPECT).max(1.0);
         // The track mixer module is always present now, so its height is
         // always reserved (previously conditional on a multi-track file).
-        let chrome_reserve = if dense_desktop { 220.0 } else { 410.0 };
-        let staff_reserve = if has_file {
+        let chrome_reserve = if paired { if has_file { 350.0 } else { 310.0 } } else if dense_desktop { 220.0 } else { 410.0 };
+        let staff_reserve = if paired && !has_file { 0.0 } else if has_file {
             if self.compact_keyboard || !dense_desktop {
                 155.0
             } else {
@@ -5492,15 +5569,14 @@ impl App {
         // The upper controls are one manufactured console, not three stacked
         // cards. One shared grain/wear layer now runs behind every module;
         // shallow grooves provide hierarchy without restarting the material.
-        let console = textured_panel(
-            column![
+        let console_content = column![
                 file_row,
                 module_divider(),
                 transport_row,
-                module_divider(),
-                track_row,
-            ]
-            .spacing(0),
+            ].spacing(0);
+        let console_content = if paired && !has_file { console_content } else { console_content.push(module_divider()).push(track_row) };
+        let console = textured_panel(
+            console_content,
             PANEL_BG,
             self.chrome_assets.dark_grain.clone(),
             self.chrome_assets.panel_wear.clone(),
@@ -5531,7 +5607,9 @@ impl App {
         })
         .height(below_height);
 
-        let content = column![above_keyboard, keyboard_region, below_keyboard]
+        let content = column![above_keyboard, keyboard_region];
+        let content = if paired && !has_file { content } else { content.push(below_keyboard) };
+        let content = content
             .spacing(0)
             .height(Length::Fill);
 
@@ -5748,6 +5826,7 @@ mod url_state {
         // settings that differ from their default, make it into the URL —
         // a stock setup stays a bare, uncluttered URL.
         let mut params: Vec<String> = Vec::new();
+        if crate::duet::embedded() { params.push("instrument=synthphone".to_string()); }
 
         for (i, param) in crate::synth::KNOB_PARAMS.iter().enumerate() {
             let pos = app
@@ -5767,12 +5846,16 @@ mod url_state {
         }
         if app.keyboard_hits_enabled {
             params.push("keys=1".to_string());
+        } else if crate::duet::embedded() {
+            params.push("keys=0".to_string());
         }
         if app.drum_symbols_enabled {
             params.push("drum_symbols=1".to_string());
         }
         if app.compact_keyboard {
             params.push("compact=1".to_string());
+        } else if crate::duet::embedded() {
+            params.push("compact=0".to_string());
         }
         if app.looper_enabled {
             params.push("loop=1".to_string());
