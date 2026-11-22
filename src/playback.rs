@@ -530,6 +530,7 @@ mod tests {
             tracks: Vec::new(),
             events,
             notes: Vec::new(),
+            note_end_prefix: Vec::new(),
             total_ticks,
         }
     }

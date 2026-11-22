@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -13,6 +13,8 @@ pub struct MidiFile {
     pub tracks:         Vec<TrackInfo>,
     pub events:         Vec<TimedEvent>,
     pub notes:          Vec<Note>,
+    /// Monotonic maximum end tick, used to skip expired notes when rendering.
+    pub note_end_prefix: Vec<u64>,
     pub total_ticks:    u64,
 }
 
@@ -79,6 +81,9 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
             (fps.as_f32() * sub as f32) as u16
         }
     };
+    if ticks_per_beat == 0 {
+        return Err("MIDI timing must have a nonzero tick resolution".into());
+    }
 
     let mut tracks: Vec<TrackInfo> = Vec::new();
     let mut tempo_map: Vec<TempoChange> = Vec::new();
@@ -123,13 +128,21 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
                 }
                 midly::TrackEventKind::Meta(meta) => match meta {
                     midly::MetaMessage::Tempo(t) => {
+                        if t.as_int() == 0 {
+                            return Err("MIDI tempo must be greater than zero".into());
+                        }
                         tempo_map.push(TempoChange {
                             at_tick:         abs_tick,
                             micros_per_beat: t.as_int(),
                         });
                     }
                     midly::MetaMessage::TimeSignature(num, den_pow, _, _) => {
-                        time_sig = (num, 1u8 << den_pow);
+                        let denominator = 1u8.checked_shl(den_pow as u32)
+                            .ok_or("MIDI time-signature denominator is too large")?;
+                        if num == 0 {
+                            return Err("MIDI time-signature numerator must be nonzero".into());
+                        }
+                        time_sig = (num, denominator);
                     }
                     midly::MetaMessage::KeySignature(key, _scale) => {
                         key_sig = key;
@@ -149,18 +162,37 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
     // Sort merged event list by tick; stable so track order is preserved within a tick
     events.sort_by_key(|e| e.tick);
 
+    tempo_map.sort_by_key(|t| t.at_tick);
     if tempo_map.is_empty() {
         tempo_map.push(TempoChange { at_tick: 0, micros_per_beat: 500_000 }); // 120 BPM default
     } else if tempo_map[0].at_tick > 0 {
         tempo_map.insert(0, TempoChange { at_tick: 0, micros_per_beat: 500_000 });
     }
-    tempo_map.sort_by_key(|t| t.at_tick);
 
     let total_ticks = events.iter().map(|e| e.tick).max().unwrap_or(0);
 
     let notes = pair_notes(&events, total_ticks);
+    let note_end_prefix = note_end_prefix(&notes);
 
-    Ok(MidiFile { ticks_per_beat, tempo_map, time_sig, key_sig, tracks, events, notes, total_ticks })
+    Ok(MidiFile { ticks_per_beat, tempo_map, time_sig, key_sig, tracks, events, notes, note_end_prefix, total_ticks })
+}
+
+pub fn note_end_prefix(notes: &[Note]) -> Vec<u64> {
+    let mut end = 0;
+    notes.iter().map(|note| {
+        end = end.max(note.end_tick);
+        end
+    }).collect()
+}
+
+impl MidiFile {
+    /// Binary-search both ends, retaining sustained notes that began before
+    /// the viewport. No full-song scan for ordinary short-note passages.
+    pub fn notes_in_window(&self, start: u64, end: u64) -> impl Iterator<Item = &Note> {
+        let first = self.note_end_prefix.partition_point(|&tick| tick < start);
+        let last = self.notes.partition_point(|note| note.start_tick <= end);
+        self.notes[first.min(last)..last].iter().filter(move |note| note.end_tick >= start)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,22 +200,24 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
 // ---------------------------------------------------------------------------
 
 fn pair_notes(events: &[TimedEvent], total_ticks: u64) -> Vec<Note> {
-    // key: (channel, note) → (start_tick, track, velocity)
-    let mut active: HashMap<(u8, u8), (u64, usize, u8)> = HashMap::new();
+    // Track identity prevents one track from consuming another's NoteOff.
+    // FIFO pairing also preserves repeated, overlapping notes on the same key.
+    let mut active: HashMap<(usize, u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
     let mut notes: Vec<Note> = Vec::new();
 
     for ev in events {
         match ev.kind {
             EventKind::NoteOn { note, velocity } => {
-                active.insert((ev.channel, note), (ev.tick, ev.track, velocity));
+                active.entry((ev.track, ev.channel, note)).or_default().push_back((ev.tick, velocity));
             }
             EventKind::NoteOff { note } => {
-                if let Some((start_tick, track, velocity)) = active.remove(&(ev.channel, note)) {
+                if let Some((start_tick, velocity)) = active.get_mut(&(ev.track, ev.channel, note))
+                    .and_then(VecDeque::pop_front) {
                     notes.push(Note {
                         start_tick,
                         end_tick: ev.tick,
                         midi_note: note,
-                        track,
+                        track: ev.track,
                         channel: ev.channel,
                         velocity,
                     });
@@ -193,8 +227,10 @@ fn pair_notes(events: &[TimedEvent], total_ticks: u64) -> Vec<Note> {
     }
 
     // Close any notes that never received a NoteOff
-    for ((channel, note), (start_tick, track, velocity)) in active {
-        notes.push(Note { start_tick, end_tick: total_ticks, midi_note: note, track, channel, velocity });
+    for ((track, channel, note), pending) in active {
+        for (start_tick, velocity) in pending {
+            notes.push(Note { start_tick, end_tick: total_ticks, midi_note: note, track, channel, velocity });
+        }
     }
 
     notes.sort_by_key(|n| n.start_tick);
@@ -339,4 +375,88 @@ pub fn bpm_at(tick: u64, tempo_map: &[TempoChange]) -> f64 {
         .map(|tc| tc.micros_per_beat)
         .unwrap_or(500_000);
     60_000_000.0 / mpb as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn midi_bytes(tracks: &[&[u8]], resolution: u16) -> Vec<u8> {
+        let mut bytes = b"MThd\0\0\0\x06\0\x01".to_vec();
+        bytes.extend_from_slice(&(tracks.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&resolution.to_be_bytes());
+        for track in tracks {
+            bytes.extend_from_slice(b"MTrk");
+            bytes.extend_from_slice(&(track.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(track);
+        }
+        bytes
+    }
+
+    #[test]
+    fn overlapping_notes_keep_their_track_and_note_off() {
+        let bytes = midi_bytes(&[
+            &[0, 0x90, 60, 100, 20, 0x80, 60, 0, 0, 0xff, 0x2f, 0],
+            &[10, 0x90, 60, 90, 20, 0x80, 60, 0, 0, 0xff, 0x2f, 0],
+        ], 480);
+        let file = load_bytes(&bytes).unwrap();
+        assert_eq!(file.notes.len(), 2);
+        assert_eq!((file.notes[0].track, file.notes[0].start_tick, file.notes[0].end_tick), (0, 0, 20));
+        assert_eq!((file.notes[1].track, file.notes[1].start_tick, file.notes[1].end_tick), (1, 10, 30));
+    }
+
+    #[test]
+    fn repeated_overlapping_note_ons_are_paired_fifo() {
+        let bytes = midi_bytes(&[
+            &[0, 0x90, 60, 100, 10, 0x90, 60, 90, 10, 0x80, 60, 0, 10, 0x80, 60, 0, 0, 0xff, 0x2f, 0],
+        ], 480);
+        let file = load_bytes(&bytes).unwrap();
+        assert_eq!(file.notes.len(), 2);
+        assert_eq!((file.notes[0].start_tick, file.notes[0].end_tick), (0, 20));
+        assert_eq!((file.notes[1].start_tick, file.notes[1].end_tick), (10, 30));
+    }
+
+    #[test]
+    fn invalid_timing_returns_errors_instead_of_panicking_or_stalling() {
+        assert!(load_bytes(&midi_bytes(&[&[0, 0xff, 0x2f, 0]], 0)).is_err());
+        assert!(load_bytes(&midi_bytes(&[&[0, 0xff, 0x51, 3, 0, 0, 0, 0, 0xff, 0x2f, 0]], 480)).is_err());
+        assert!(load_bytes(&midi_bytes(&[&[0, 0xff, 0x58, 4, 4, 255, 24, 8, 0, 0xff, 0x2f, 0]], 480)).is_err());
+    }
+
+    fn indexed_song() -> MidiFile {
+        let mut file = load_bytes(&midi_bytes(&[&[0, 0xff, 0x2f, 0]], 480)).unwrap();
+        file.notes = (0..100_000).map(|i| Note {
+            start_tick: i * 10,
+            end_tick: i * 10 + if i == 40_000 { 100_000 } else { 8 },
+            midi_note: 60, track: 0, channel: 0, velocity: 100,
+        }).collect();
+        file.note_end_prefix = note_end_prefix(&file.notes);
+        file
+    }
+
+    #[test]
+    fn indexed_windows_match_full_scan_including_sustains_and_boundaries() {
+        let file = indexed_song();
+        for (start, end) in [(0, 0), (8, 10), (9, 9), (450_000, 450_500), (999_998, 1_000_100), (1_000_001, 1_000_100)] {
+            let expected: Vec<_> = file.notes.iter().filter(|n| n.start_tick <= end && n.end_tick >= start).map(|n| n.start_tick).collect();
+            let actual: Vec<_> = file.notes_in_window(start, end).map(|n| n.start_tick).collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; run with --ignored --nocapture"]
+    fn measure_staff_note_lookup() {
+        use std::{hint::black_box, time::Instant};
+        let file = indexed_song();
+        let ranges: Vec<_> = (0..1_000).map(|i| (600_000 + i * 10, 600_500 + i * 10)).collect();
+        let start = Instant::now();
+        let full: usize = ranges.iter().map(|&(a, b)| black_box(&file.notes).iter().filter(|n| n.start_tick <= b && n.end_tick >= a).count()).sum();
+        let scan_elapsed = start.elapsed();
+        let start = Instant::now();
+        let indexed: usize = ranges.iter().map(|&(a, b)| black_box(&file).notes_in_window(a, b).count()).sum();
+        let indexed_elapsed = start.elapsed();
+        assert_eq!(full, indexed);
+        println!("100,000 notes / 1,000 viewport lookups: full scan {scan_elapsed:?}, indexed {indexed_elapsed:?}");
+    }
 }

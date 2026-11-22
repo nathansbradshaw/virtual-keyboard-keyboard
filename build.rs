@@ -80,6 +80,24 @@ fn main() {
     assert_eq!(specs.len(), 100);
 
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+    // Keep photographic masters intact. Ship full-resolution WebP textures,
+    // matching the key-sprite pipeline instead of embedding multi-megabyte PNGs.
+    let texture_dir = output_dir.join("k2-textures");
+    fs::create_dir_all(&texture_dir).expect("could not create texture output directory");
+    for name in [
+        "wood-grain", "dark-panel-grain", "keyboard-clean-mask",
+        "led-panel-board-crop", "panel-wear-overlay-runtime",
+    ] {
+        let source = asset_dir.join(format!("{name}.png"));
+        println!("cargo:rerun-if-changed={}", source.display());
+        let pixels = image::open(&source)
+            .unwrap_or_else(|error| panic!("could not open {}: {error}", source.display()))
+            .into_rgba8();
+        let encoded = webp::Encoder::from_rgba(pixels.as_raw(), pixels.width(), pixels.height())
+            .encode(90.0);
+        fs::write(texture_dir.join(format!("{name}.webp")), encoded.as_ref())
+            .expect("could not write runtime texture");
+    }
     let sprite_dir = output_dir.join("k2-key-sprites");
     fs::create_dir_all(&sprite_dir).expect("could not create key sprite output directory");
 

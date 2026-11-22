@@ -29,8 +29,8 @@ impl PhotoBoardAssets {
     pub fn new() -> Self {
         let handle = |bytes: &'static [u8]| iced::widget::image::Handle::from_bytes(bytes);
         Self {
-            shell: handle(&include_bytes!("../assets/keyboard/keyboard-clean-mask.png")[..]),
-            leds: handle(&include_bytes!("../assets/keyboard/led-panel-board-crop.png")[..]),
+            shell: handle(include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/keyboard-clean-mask.webp"))),
+            leds: handle(include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/led-panel-board-crop.webp"))),
             // Pre-sized offline with Lanczos filtering. Keeping runtime work
             // to one small PNG decode avoids blocking WASM startup on a 1024px
             // resize while retaining the master asset for future exports.
@@ -321,6 +321,9 @@ pub struct CanvasState {
     photo_cache: canvas::Cache,
     photo_crop_cache: canvas::Cache,
     overlay_cache: canvas::Cache,
+    overlay_inputs: RefCell<Option<BoardVisualState>>,
+    overlay_badges: RefCell<Vec<(Rectangle, Vec<usize>)>>,
+    overlay_knob_pointers: RefCell<Vec<(Rectangle, f32)>>,
     /// The knob drag popup gets its own geometry layer, separate from the
     /// crowded overlay frame — some large fills/thick strokes silently fail
     /// to render when they land late in a frame packed with hundreds of
@@ -343,6 +346,22 @@ pub struct CanvasState {
     /// itself sits above the pop-up track, so an absolute mapping always
     /// started the drag off the top or bottom of the track.
     drag_start: Option<(f32, f32)>,
+}
+
+/// The playhead is deliberately absent: scrolling the staff does not change
+/// the keyboard. Preserve geometry until its actual visual inputs change.
+#[derive(PartialEq)]
+struct BoardVisualState {
+    compact_crop: bool,
+    highlighted: HashMap<KeyId, usize>,
+    overlay_highlighted: Option<HashMap<KeyId, usize>>,
+    play_order: Option<HashMap<KeyId, Vec<usize>>>,
+    selected_controls: HashSet<KeyId>,
+    pressed: HashSet<KeyId>,
+    projected_labels: Option<HashMap<KeyId, String>>,
+    show_drum_symbols: bool,
+    knob_values: Vec<f32>,
+    active_knob: Option<(u8, f32)>,
 }
 
 /// Vertical extent of the pop-up slider shown while a knob is held, in
@@ -461,14 +480,31 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        state.overlay_cache.clear(); // highlights can change every 16 ms during playback
-        state.knob_pointer_cache.clear(); // knob values can change just as often
         let active_knob = state.dragging_knob.map(|idx| {
             (
                 idx,
                 self.knob_values.get(idx as usize).copied().unwrap_or(0.0),
             )
         });
+        let inputs = BoardVisualState {
+            compact_crop: self.compact_crop,
+            highlighted: self.highlighted.clone(),
+            overlay_highlighted: self.overlay_highlighted.cloned(),
+            play_order: self.play_order.cloned(),
+            selected_controls: self.selected_controls.clone(),
+            pressed: self.pressed.clone(),
+            projected_labels: self.projected_labels.cloned(),
+            show_drum_symbols: self.show_drum_symbols,
+            knob_values: self.knob_values.to_vec(),
+            active_knob,
+        };
+        if state.overlay_inputs.borrow().as_ref() != Some(&inputs) {
+            state.overlay_cache.clear();
+            state.knob_pointer_cache.clear();
+            state.badge_cache.clear();
+            state.slider_cache.clear();
+            *state.overlay_inputs.borrow_mut() = Some(inputs);
+        }
         let photo_cache = if self.compact_crop {
             &state.photo_crop_cache
         } else {
@@ -479,9 +515,9 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
                 draw_board_base(frame, self.photo_assets, self.compact_crop);
             });
         });
-        let mut badges: Vec<(Rectangle, Vec<usize>)> = Vec::new();
-        let mut knob_pointers: Vec<(Rectangle, f32)> = Vec::new();
         let overlay_geometry = state.overlay_cache.draw(renderer, bounds.size(), |frame| {
+            let mut badges = Vec::new();
+            let mut knob_pointers = Vec::new();
             frame.with_clip(canvas_clip(bounds.size()), |frame| {
                 draw_board_overlay(
                     frame,
@@ -502,7 +538,11 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
                     &mut knob_pointers,
                 );
             });
+            *state.overlay_badges.borrow_mut() = badges;
+            *state.overlay_knob_pointers.borrow_mut() = knob_pointers;
         });
+        let badges = state.overlay_badges.borrow();
+        let knob_pointers = state.overlay_knob_pointers.borrow();
         // Keep interaction imagery separate from the cached photographic base
         // so active, colour-swapped key sprites render above the resting rows.
         let mut geometries = vec![photo_geometry, overlay_geometry];
@@ -516,7 +556,7 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
                     .knob_pointer_cache
                     .draw(renderer, bounds.size(), |frame| {
                         frame.with_clip(canvas_clip(bounds.size()), |frame| {
-                            for (rect, value) in &knob_pointers {
+                            for (rect, value) in knob_pointers.iter() {
                                 draw_knob_pointer(frame, *rect, *value);
                             }
                         });
@@ -528,7 +568,6 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
         // `slider_cache` doc comment for why it can't just be the last thing
         // drawn into the (already large) overlay frame.
         if let Some((idx, value)) = active_knob {
-            state.slider_cache.clear();
             let slider_geometry = state.slider_cache.draw(renderer, bounds.size(), |frame| {
                 if let Some(knob_rect) = self
                     .keys
@@ -545,9 +584,8 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
         // Play-order badges also get their own isolated geometry — see the
         // `badge_cache` doc comment.
         if !badges.is_empty() {
-            state.badge_cache.clear();
             let badge_geometry = state.badge_cache.draw(renderer, bounds.size(), |frame| {
-                for (rect, steps) in &badges {
+                for (rect, steps) in badges.iter() {
                     draw_play_order_badge(frame, *rect, steps);
                 }
             });
@@ -2087,6 +2125,39 @@ fn draw_knob_pointer(frame: &mut Frame, rect: Rectangle, value: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_textures_keep_dimensions_and_transparency() {
+        let textures: [(&str, &[u8]); 5] = [
+            ("wood-grain", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/wood-grain.webp"))),
+            ("dark-panel-grain", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/dark-panel-grain.webp"))),
+            ("keyboard-clean-mask", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/keyboard-clean-mask.webp"))),
+            ("led-panel-board-crop", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/led-panel-board-crop.webp"))),
+            ("panel-wear-overlay-runtime", include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/panel-wear-overlay-runtime.webp"))),
+        ];
+        let mut original_bytes = 0;
+        let mut runtime_bytes = 0;
+        for (name, bytes) in textures {
+            let source = std::fs::read(format!("assets/keyboard/{name}.png")).unwrap();
+            original_bytes += source.len();
+            runtime_bytes += bytes.len();
+            let before = image::load_from_memory(&source).unwrap().into_rgba8();
+            let after = image::load_from_memory(bytes).unwrap().into_rgba8();
+            assert_eq!(before.dimensions(), after.dimensions(), "{name}");
+            let mut rgb_error = 0u64;
+            let mut opaque = 0u64;
+            for (a, b) in before.pixels().zip(after.pixels()) {
+                assert_eq!(a[3], b[3], "{name}: alpha changed");
+                if a[3] == 255 {
+                    opaque += 1;
+                    rgb_error += (0..3).map(|i| a[i].abs_diff(b[i]) as u64).sum::<u64>();
+                }
+            }
+            assert!(opaque == 0 || rgb_error as f64 / ((3 * opaque) as f64) < 8.0, "{name}: excessive texture error");
+        }
+        assert!(runtime_bytes < original_bytes / 2);
+        println!("Startup textures: {original_bytes} PNG bytes -> {runtime_bytes} WebP bytes");
+    }
 
     #[test]
     fn every_photographic_key_has_every_preprocessed_variant() {

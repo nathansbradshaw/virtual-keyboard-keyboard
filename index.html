@@ -85,6 +85,14 @@
         opacity: 0.85;
       }
 
+      #loading-screen .retry {
+        display: none;
+        color: #d98e4c;
+      }
+
+      #loading-screen.failed .spinner { display: none; }
+      #loading-screen.failed .retry { display: block; }
+
       @keyframes loading-spin {
         to {
           transform: rotate(360deg);
@@ -97,19 +105,24 @@
     <div id="loading-screen">
       <div class="spinner"></div>
       <div class="title">Loading K2 MIDI Viewer&hellip;</div>
+      <a class="retry" href="">Reload viewer</a>
     </div>
     <script>
-      // The app itself removes the "hidden" class (via `boot::notify_first_frame`
-      // in src/main.rs) once it has actually rendered a frame — wasm finishing
-      // module init isn't enough of a signal, since WebGL/wgpu setup runs
-      // asynchronously after that and leaves the canvas blank for a few more
-      // seconds. This timeout is only a safety net for the rare case that
-      // never happens (a panic before the first frame, WebGL unsupported).
+      // Rust hides this after the first window frame. Bootstrap failures can
+      // occur before Rust starts, so this small HTML fallback must live here.
+      function showStartupFailure() {
+        const el = document.getElementById("loading-screen");
+        if (el && !el.classList.contains("hidden")) {
+          el.classList.add("failed");
+          el.querySelector(".title").textContent =
+            "K2 could not finish starting. Please reload.";
+        }
+      }
+      window.addEventListener("unhandledrejection", showStartupFailure);
       window.setTimeout(() => {
         const el = document.getElementById("loading-screen");
         if (el && !el.classList.contains("hidden")) {
-          console.warn("K2 MIDI Viewer: timed out waiting for first frame; hiding loading screen.");
-          el.classList.add("hidden");
+          showStartupFailure();
         }
       }, 45000);
     </script>
