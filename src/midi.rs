@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct MidiFile {
     pub ticks_per_beat: u16,
     pub tempo_map:      Vec<TempoChange>,
+    pub tempo_clock:    crate::tempo_clock::TempoClock,
     pub time_sig:       (u8, u8),   // numerator, denominator
     pub key_sig:        i8,         // -7..+7, negative = flats, positive = sharps
     pub tracks:         Vec<TrackInfo>,
@@ -173,8 +174,9 @@ pub fn load_bytes(bytes: &[u8]) -> Result<MidiFile, String> {
 
     let notes = pair_notes(&events, total_ticks);
     let note_end_prefix = note_end_prefix(&notes);
+    let tempo_clock = crate::tempo_clock::TempoClock::new(&tempo_map, ticks_per_beat);
 
-    Ok(MidiFile { ticks_per_beat, tempo_map, time_sig, key_sig, tracks, events, notes, note_end_prefix, total_ticks })
+    Ok(MidiFile { ticks_per_beat, tempo_map, tempo_clock, time_sig, key_sig, tracks, events, notes, note_end_prefix, total_ticks })
 }
 
 pub fn note_end_prefix(notes: &[Note]) -> Vec<u64> {
@@ -343,6 +345,7 @@ pub fn group_play_events(
 
 /// Convert an absolute tick to absolute microseconds, accounting for all
 /// tempo changes up to that point.
+#[cfg(test)]
 pub fn tick_to_micros_abs(tick: u64, tempo_map: &[TempoChange], ticks_per_beat: u16) -> u64 {
     let mut total_us = 0u64;
     let mut prev_tick = 0u64;
@@ -363,7 +366,7 @@ pub fn tick_to_micros_abs(tick: u64, tempo_map: &[TempoChange], ticks_per_beat: 
 
 /// Duration of the whole file in seconds.
 pub fn total_duration_secs(file: &MidiFile) -> f64 {
-    tick_to_micros_abs(file.total_ticks, &file.tempo_map, file.ticks_per_beat) as f64 / 1_000_000.0
+    file.tempo_clock.micros_at_tick(file.total_ticks) as f64 / 1_000_000.0
 }
 
 /// Current tempo in BPM at a given tick.

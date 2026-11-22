@@ -15,6 +15,7 @@ const HALF_SPACE: f32 = LINE_SPACING / 2.0;
 const CLEF_WIDTH: f32 = 60.0;
 const BEHIND_BEATS: f32 = 2.0;
 const AHEAD_BEATS: f32 = 12.0;
+const MAX_VISIBLE_NOTES: usize = 1024;
 
 // Diatonic step within the octave (0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B).
 // Sharps share their natural's diatonic slot.
@@ -478,7 +479,11 @@ fn draw_staff(
                 col: track_note_color(note.track, is_active, is_past),
             })
         })
+        .take(MAX_VISIBLE_NOTES + 1)
         .collect();
+
+    let density_limited = plotted.len() > MAX_VISIBLE_NOTES;
+    plotted.truncate(MAX_VISIBLE_NOTES);
 
     // Background pass: duration bars and ledger lines for every note.
     for p in &plotted {
@@ -537,6 +542,18 @@ fn draw_staff(
     }
 
     // ── Playhead ─────────────────────────────────────────────────────────────
+    if density_limited {
+        frame.fill_text(Text {
+            content: "Dense passage: some notes hidden".to_string(),
+            position: Point::new(w - 12.0, h - 8.0),
+            color: Color::from_rgb8(0xE9, 0xA3, 0x29),
+            size: iced::Pixels(11.0),
+            font: CANVAS_FONT,
+            align_x: Horizontal::Right.into(),
+            align_y: Vertical::Bottom,
+            ..Text::default()
+        });
+    }
     frame.stroke(
         &Path::line(Point::new(playhead_x, 0.0), Point::new(playhead_x, h)),
         canvas::Stroke::default()
