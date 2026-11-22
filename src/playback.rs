@@ -4,7 +4,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::midi::{EventKind, MidiFile, tick_to_micros_abs};
+use crate::midi::{EventKind, MidiFile};
 use crate::synth::SoftSynth;
 
 // ---------------------------------------------------------------------------
@@ -167,19 +167,7 @@ fn output_channel(track: usize, original_channel: u8, track_channel: &[u8]) -> u
 /// Inverse of `tick_to_micros_abs`, used to report a smooth playhead even
 /// across long rests where there are no MIDI events to supply a tick value.
 fn tick_at_micros(file: &MidiFile, micros: u64) -> u64 {
-    let mut low = 0u64;
-    let mut high = file.total_ticks;
-
-    while low < high {
-        let mid = low + (high - low + 1) / 2;
-        if tick_to_micros_abs(mid, &file.tempo_map, file.ticks_per_beat) <= micros {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-
-    low
+    file.tempo_clock.tick_at_micros(micros, file.total_ticks)
 }
 
 fn publish_position(events_out: &Arc<Mutex<VecDeque<PlayEvent>>>, tick: u64, clear: bool) {
@@ -282,7 +270,7 @@ fn run(
         }
 
         // ── Playing: anchor the clock to the exact playhead tick ────────────
-        let mut start_us = tick_to_micros_abs(position_tick, &file.tempo_map, file.ticks_per_beat);
+        let mut start_us = file.tempo_clock.micros_at_tick(position_tick);
         let mut wall_start = Instant::now();
         let mut last_position_report = Instant::now();
 
@@ -320,7 +308,7 @@ fn run(
             // through the UI thread—so both section loops (a staff selection)
             // and whole-song loops stay sample-accurate and gapless.
             if let Some((loop_start, loop_end)) = loop_range {
-                let loop_end_us = tick_to_micros_abs(loop_end, &file.tempo_map, file.ticks_per_beat);
+                let loop_end_us = file.tempo_clock.micros_at_tick(loop_end);
                 if now_us >= loop_end_us {
                     all_notes_off(&mut midi_conn, &synth);
                     position_tick = loop_start;
@@ -332,13 +320,13 @@ fn run(
 
             let timeline_finished = cursor >= file.events.len();
             let event_us = file.events.get(cursor)
-                .map(|ev| tick_to_micros_abs(ev.tick, &file.tempo_map, file.ticks_per_beat))
+                .map(|ev| file.tempo_clock.micros_at_tick(ev.tick))
                 .unwrap_or_else(|| {
-                    tick_to_micros_abs(file.total_ticks, &file.tempo_map, file.ticks_per_beat)
+                    file.tempo_clock.micros_at_tick(file.total_ticks)
                 });
             let until_event_us = event_us.saturating_sub(now_us);
             let until_loop_us = loop_range.map(|(_, loop_end)| {
-                tick_to_micros_abs(loop_end, &file.tempo_map, file.ticks_per_beat)
+                file.tempo_clock.micros_at_tick(loop_end)
                     .saturating_sub(now_us)
             });
 
@@ -519,12 +507,14 @@ mod tests {
     use crate::midi::{EventKind, MidiFile, TempoChange, TimedEvent};
 
     fn timeline(events: Vec<TimedEvent>, total_ticks: u64) -> MidiFile {
+        let tempo_map = vec![
+            TempoChange { at_tick: 0, micros_per_beat: 500_000 },
+            TempoChange { at_tick: 960, micros_per_beat: 1_000_000 },
+        ];
         MidiFile {
             ticks_per_beat: 480,
-            tempo_map: vec![
-                TempoChange { at_tick: 0, micros_per_beat: 500_000 },
-                TempoChange { at_tick: 960, micros_per_beat: 1_000_000 },
-            ],
+            tempo_clock: crate::tempo_clock::TempoClock::new(&tempo_map, 480),
+            tempo_map,
             time_sig: (4, 4),
             key_sig: 0,
             tracks: Vec::new(),

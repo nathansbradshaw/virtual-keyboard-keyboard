@@ -37,3 +37,7 @@ web-sys = { version = "0.3", features = [
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[profile.web-release]
+inherits = "release"
+opt-level = "s"

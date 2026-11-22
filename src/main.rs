@@ -11,6 +11,9 @@ mod playback;
 mod render;
 mod staff;
 mod synth;
+mod tempo_clock;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod playback_budget;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicBool;
@@ -2273,6 +2276,7 @@ struct App {
     /// One or more chronological play-step numbers displayed on each key while
     /// a staff range is selected. Notes that begin together share a step.
     selection_play_order: HashMap<KeyId, Vec<usize>>,
+    selection_summary_cache: Option<String>,
 }
 
 impl Default for App {
@@ -2392,6 +2396,7 @@ impl Default for App {
             staff_selection: None,
             selection_highlight_cache: HashMap::new(),
             selection_play_order: HashMap::new(),
+            selection_summary_cache: None,
         };
         apply_url_settings(&mut app);
         app
@@ -3279,6 +3284,7 @@ impl App {
     fn rebuild_selection_highlight(&mut self) {
         self.selection_highlight_cache.clear();
         self.selection_play_order.clear();
+        self.selection_summary_cache = None;
         let Some(ref f) = self.midi_file else { return };
         let Some((s, e)) = self.staff_selection else {
             return;
@@ -3288,7 +3294,7 @@ impl App {
         let mut play_ticks: HashMap<KeyId, Vec<u64>> = HashMap::new();
 
         if self.key_pick_mode == KeyPickMode::Closest {
-            for note in &f.notes {
+            for note in f.notes_in_window(s, e) {
                 if self.track_muted.get(note.track).copied().unwrap_or(false) {
                     continue;
                 }
@@ -3311,7 +3317,7 @@ impl App {
                 }
             }
         } else {
-            for note in &f.notes {
+            for note in f.notes_in_window(s, e) {
                 if self.track_muted.get(note.track).copied().unwrap_or(false) {
                     continue;
                 }
@@ -3339,7 +3345,7 @@ impl App {
 
         // Out-of-range melodic notes within the selection — same nearest-keyboard
         // fallback as rebuild_all_notes_cache.
-        for note in &f.notes {
+        for note in f.notes_in_window(s, e) {
             if self.track_muted.get(note.track).copied().unwrap_or(false) {
                 continue;
             }
@@ -3371,6 +3377,7 @@ impl App {
         }
 
         self.selection_play_order = play_order_from_ticks(play_ticks);
+        self.selection_summary_cache = self.compute_selection_summary();
     }
 
     /// Tells the playback thread about a new octave offset, so it can tell which
@@ -3748,6 +3755,7 @@ impl App {
                 self.staff_selection = None;
                 self.selection_highlight_cache.clear();
                 self.selection_play_order.clear();
+                self.selection_summary_cache = None;
 
                 // Drop any existing playback thread
                 self.playback_handle = None;
@@ -3970,6 +3978,11 @@ impl App {
                 };
                 for evt in events {
                     match evt {
+                        #[cfg(target_arch = "wasm32")]
+                        PlayEvent::ResetNotes => {
+                            self.highlighted.clear();
+                            self.active_highlight_keys.clear();
+                        }
                         PlayEvent::NoteOn(note, track, channel) => {
                             if !self.show_all_notes {
                                 if channel == synth::DRUM_CHANNEL {
@@ -4199,13 +4212,16 @@ impl App {
 
     /// Human-readable summary of the notes under the current staff selection.
     fn selection_summary(&self) -> Option<String> {
+        self.selection_summary_cache.clone()
+    }
+
+    fn compute_selection_summary(&self) -> Option<String> {
         let f = self.midi_file.as_ref()?;
         let (s, e) = self.staff_selection?;
         let e = e.max(s + 1); // a zero-width selection still catches notes at that instant
 
         let mut notes: Vec<&midi::Note> = f
-            .notes
-            .iter()
+            .notes_in_window(s, e)
             .filter(|n| n.start_tick < e && n.end_tick > s)
             .filter(|n| !self.track_muted.get(n.track).copied().unwrap_or(false))
             .collect();
@@ -4216,32 +4232,40 @@ impl App {
 
         notes.sort_by_key(|n| (n.track, n.start_tick));
 
-        let mut by_track: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut by_track: Vec<(usize, usize, Vec<String>)> = Vec::new();
         for n in &notes {
-            let name = staff::note_name(n.midi_note);
             match by_track.last_mut() {
-                Some((t, names)) if *t == n.track => names.push(name),
-                _ => by_track.push((n.track, vec![name])),
+                Some((t, count, names)) if *t == n.track => {
+                    *count += 1;
+                    if names.len() < 12 { names.push(staff::note_name(n.midi_note)); }
+                }
+                _ => by_track.push((n.track, 1, vec![staff::note_name(n.midi_note)])),
             }
         }
 
         let track_strs: Vec<String> = by_track
             .iter()
-            .map(|(t, names)| {
+            .take(8)
+            .map(|(t, count, names)| {
                 let tname = f
                     .tracks
                     .get(*t)
                     .and_then(|ti| ti.name.as_deref())
                     .unwrap_or("Track");
-                format!("T{} {}: {}", t + 1, tname, names.join(", "))
+                let more = count.saturating_sub(names.len());
+                let suffix = if more > 0 { format!(" … +{more} more") } else { String::new() };
+                format!("T{} {}: {}{}", t + 1, tname, names.join(", "), suffix)
             })
             .collect();
 
+        let more_tracks = by_track.len().saturating_sub(8);
+        let suffix = if more_tracks > 0 { format!(" … +{more_tracks} tracks") } else { String::new() };
         Some(format!(
-            "{} note{} · {}",
+            "{} note{} · {}{}",
             notes.len(),
             if notes.len() == 1 { "" } else { "s" },
             track_strs.join("   |   "),
+            suffix,
         ))
     }
 
@@ -4944,9 +4968,8 @@ impl App {
             } else {
                 0.0
             };
-            let cur_us =
-                midi::tick_to_micros_abs(self.position_tick, &f.tempo_map, f.ticks_per_beat);
-            let tot_us = midi::tick_to_micros_abs(f.total_ticks, &f.tempo_map, f.ticks_per_beat);
+            let cur_us = f.tempo_clock.micros_at_tick(self.position_tick);
+            let tot_us = f.tempo_clock.micros_at_tick(f.total_ticks);
             let fmt = |us: u64| format!("{}:{:02}", us / 60_000_000, (us % 60_000_000) / 1_000_000);
             (p, format!("{} / {}", fmt(cur_us), fmt(tot_us)))
         } else {

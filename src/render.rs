@@ -322,7 +322,7 @@ pub struct CanvasState {
     photo_crop_cache: canvas::Cache,
     overlay_cache: canvas::Cache,
     overlay_inputs: RefCell<Option<BoardVisualState>>,
-    overlay_badges: RefCell<Vec<(Rectangle, Vec<usize>)>>,
+    overlay_badges: RefCell<Vec<(Rectangle, String)>>,
     overlay_knob_pointers: RefCell<Vec<(Rectangle, f32)>>,
     /// The knob drag popup gets its own geometry layer, separate from the
     /// crowded overlay frame — some large fills/thick strokes silently fail
@@ -355,7 +355,7 @@ struct BoardVisualState {
     compact_crop: bool,
     highlighted: HashMap<KeyId, usize>,
     overlay_highlighted: Option<HashMap<KeyId, usize>>,
-    play_order: Option<HashMap<KeyId, Vec<usize>>>,
+    play_order: Option<HashMap<KeyId, String>>,
     selected_controls: HashSet<KeyId>,
     pressed: HashSet<KeyId>,
     projected_labels: Option<HashMap<KeyId, String>>,
@@ -490,7 +490,8 @@ impl<'a> canvas::Program<Message> for BoardCanvas<'a> {
             compact_crop: self.compact_crop,
             highlighted: self.highlighted.clone(),
             overlay_highlighted: self.overlay_highlighted.cloned(),
-            play_order: self.play_order.cloned(),
+            play_order: self.play_order.map(|order| order.iter()
+                .map(|(&key, steps)| (key, play_order_label(steps))).collect()),
             selected_controls: self.selected_controls.clone(),
             pressed: self.pressed.clone(),
             projected_labels: self.projected_labels.cloned(),
@@ -1247,7 +1248,7 @@ fn draw_board_overlay(
     show_drum_symbols: bool,
     knob_values: &[f32],
     active_knob: Option<(u8, f32)>,
-    badges: &mut Vec<(Rectangle, Vec<usize>)>,
+    badges: &mut Vec<(Rectangle, String)>,
     knob_pointers: &mut Vec<(Rectangle, f32)>,
 ) {
     let size = frame.size();
@@ -1343,7 +1344,7 @@ fn draw_board_overlay(
                 projected_label.map(String::as_str),
             );
             if let Some(steps) = play_order.and_then(|order| order.get(&key.id)) {
-                badges.push((visual_rect, steps.clone()));
+                badges.push((visual_rect, play_order_label(steps)));
             }
             continue;
         }
@@ -1445,7 +1446,7 @@ fn draw_board_overlay(
         }
 
         if let Some(steps) = play_order.and_then(|order| order.get(&key.id)) {
-            badges.push((visual_rect, steps.clone()));
+            badges.push((visual_rect, play_order_label(steps)));
         }
     }
 }
@@ -1853,16 +1854,17 @@ fn draw_drum_symbol(
 /// Draws a compact, high-contrast sequence badge in the key's upper-right
 /// corner. A repeated key reads e.g. "2·5"; simultaneous chord keys all show
 /// the same number.
-fn draw_play_order_badge(frame: &mut Frame, key_rect: Rectangle, steps: &[usize]) {
-    if steps.is_empty() {
+fn play_order_label(steps: &[usize]) -> String {
+    let mut label = steps.iter().take(3).map(usize::to_string).collect::<Vec<_>>().join("·");
+    if steps.len() > 3 { label.push_str(&format!(" +{}", steps.len() - 3)); }
+    label
+}
+
+fn draw_play_order_badge(frame: &mut Frame, key_rect: Rectangle, label: &str) {
+    if label.is_empty() {
         return;
     }
 
-    let label = steps
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join("·");
     let char_count = label.chars().count().max(1) as f32;
     let width = (char_count * 6.0 + 10.0).clamp(18.0, key_rect.width - 8.0);
     let height: f32 = 18.0;
@@ -1885,7 +1887,7 @@ fn draw_play_order_badge(frame: &mut Frame, key_rect: Rectangle, steps: &[usize]
     // than spilling across adjacent labels.
     let font_size = (width / (char_count * 0.62)).clamp(6.0, 10.0);
     frame.fill_text(Text {
-        content: label,
+        content: label.to_owned(),
         position: Point::new(badge.x + badge.width / 2.0, badge.y + badge.height / 2.0),
         color: Color::WHITE,
         size: iced::Pixels(font_size),
@@ -2125,6 +2127,14 @@ fn draw_knob_pointer(frame: &mut Frame, rect: Rectangle, value: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huge_play_order_badges_have_bounded_text_without_losing_the_count() {
+        assert_eq!(play_order_label(&[]), "");
+        assert_eq!(play_order_label(&[2, 5]), "2·5");
+        let steps: Vec<_> = (1..=100_000).collect();
+        assert_eq!(play_order_label(&steps), "1·2·3 +99997");
+    }
 
     #[test]
     fn startup_textures_keep_dimensions_and_transparency() {

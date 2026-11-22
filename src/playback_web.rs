@@ -12,7 +12,7 @@ use web_sys::{
     MidiAccess, MidiInput, MidiMessageEvent, MidiOptions, MidiOutput, MidiPortDeviceState,
 };
 
-use crate::midi::{EventKind, MidiFile, tick_to_micros_abs};
+use crate::midi::{EventKind, MidiFile};
 use crate::synth::SoftSynth;
 
 #[derive(Debug)]
@@ -38,6 +38,7 @@ pub enum PlayCmd {
 
 #[derive(Debug)]
 pub enum PlayEvent {
+    ResetNotes,
     NoteOn(u8, usize, u8),
     NoteOff(u8, u8),
     Position(u64),
@@ -353,39 +354,44 @@ impl WebPlayback {
         let raw_target_micros = self
             .start_micros
             .saturating_add(scaled_duration_micros(elapsed, self.speed));
-        let total_micros = tick_to_micros_abs(
-            self.file.total_ticks,
-            &self.file.tempo_map,
-            self.file.ticks_per_beat,
-        );
+        let total_micros = self.file.tempo_clock.micros_at_tick(self.file.total_ticks);
         // A loop range wraps the transport back to its start the instant
         // playback reaches its end—so both section loops (a staff selection)
         // and whole-song loops stay sample-accurate and gapless, without
         // waiting for a Done round-trip through the UI thread.
         let loop_end_micros = self.loop_range.map(|(_, end)| {
-            tick_to_micros_abs(end, &self.file.tempo_map, self.file.ticks_per_beat)
+            self.file.tempo_clock.micros_at_tick(end)
         });
         let target_micros = loop_end_micros.map_or(raw_target_micros, |end| raw_target_micros.min(end));
 
-        while let Some(event) = self.file.events.get(self.cursor) {
-            let event_micros =
-                tick_to_micros_abs(event.tick, &self.file.tempo_map, self.file.ticks_per_beat);
-            if event_micros > target_micros {
-                break;
+        let target_tick = tick_at_micros(&self.file, target_micros.min(total_micros));
+        match crate::playback_budget::plan(&self.file.events, self.cursor, target_tick) {
+            crate::playback_budget::DispatchPlan::Events(range) => {
+                for index in range {
+                    let event = self.file.events[index].clone();
+                    self.cursor = index + 1;
+                    self.dispatch_event(event);
+                }
             }
-
-            let event = event.clone();
-            self.cursor += 1;
-            self.dispatch_event(event);
+            crate::playback_budget::DispatchPlan::Resync { next_cursor } => {
+                let skipped = next_cursor - self.cursor;
+                self.all_notes_off();
+                self.clear_and_publish(PlayEvent::ResetNotes);
+                self.cursor = next_cursor;
+                self.position_tick = target_tick;
+                if target_micros < total_micros {
+                    self.restore_notes_at_position(true, crate::playback_budget::MAX_RECOVERY_NOTES);
+                }
+                web_sys::console::info_1(&format!("K2 recovered from a backlog of {skipped} MIDI events").into());
+            }
         }
 
-        self.position_tick = tick_at_micros(&self.file, target_micros.min(total_micros));
+        self.position_tick = target_tick;
         self.publish(PlayEvent::Position(self.position_tick));
 
         if let (Some((loop_start, _)), Some(loop_end_micros)) = (self.loop_range, loop_end_micros) {
             if raw_target_micros >= loop_end_micros {
                 self.seek_to(loop_start);
-                self.clear_and_publish(PlayEvent::Position(self.position_tick));
                 return;
             }
         }
@@ -413,11 +419,7 @@ impl WebPlayback {
                         self.position_tick = 0;
                         self.cursor = 0;
                     }
-                    self.start_micros = tick_to_micros_abs(
-                        self.position_tick,
-                        &self.file.tempo_map,
-                        self.file.ticks_per_beat,
-                    );
+                    self.start_micros = self.file.tempo_clock.micros_at_tick(self.position_tick);
                     self.wall_start = Instant::now();
                     self.playing = true;
                     self.restore_held_notes();
@@ -436,7 +438,6 @@ impl WebPlayback {
                 }
                 PlayCmd::SeekTo(tick) => {
                     self.seek_to(tick);
-                    self.clear_and_publish(PlayEvent::Position(self.position_tick));
                 }
                 PlayCmd::SetAudio(enabled) => {
                     self.audio_enabled.store(enabled, Ordering::Relaxed);
@@ -512,20 +513,18 @@ impl WebPlayback {
     /// loop wraps, which are just a seek back to the loop start.
     fn seek_to(&mut self, tick: u64) {
         self.all_notes_off();
+        self.clear_and_publish(PlayEvent::ResetNotes);
         self.position_tick = tick.min(self.file.total_ticks);
         self.cursor = self
             .file
             .events
             .partition_point(|event| event.tick < self.position_tick);
-        self.start_micros = tick_to_micros_abs(
-            self.position_tick,
-            &self.file.tempo_map,
-            self.file.ticks_per_beat,
-        );
+        self.start_micros = self.file.tempo_clock.micros_at_tick(self.position_tick);
         self.wall_start = Instant::now();
         if self.playing {
             self.restore_held_notes();
         }
+        self.publish(PlayEvent::Position(self.position_tick));
     }
 
     fn capture_position(&mut self) {
@@ -568,18 +567,22 @@ impl WebPlayback {
     }
 
     fn restore_held_notes(&mut self) {
-        if self.position_tick == 0 {
+        self.restore_notes_at_position(false, crate::playback_budget::MAX_RECOVERY_NOTES);
+    }
+
+    fn restore_notes_at_position(&mut self, include_onset: bool, limit: usize) {
+        if self.position_tick == 0 && !include_onset {
             return;
         }
 
         let held: Vec<_> = self
             .file
-            .notes
-            .iter()
+            .notes_in_window(self.position_tick, self.position_tick)
             .filter(|note| {
-                note.start_tick < self.position_tick && note.end_tick > self.position_tick
+                (include_onset || note.start_tick < self.position_tick) && note.end_tick > self.position_tick
             })
             .filter(|note| !self.track_muted.get(note.track).copied().unwrap_or(false))
+            .take(limit)
             .cloned()
             .collect();
         for note in held {
@@ -654,16 +657,5 @@ fn scaled_duration_micros(duration: Duration, speed: f32) -> u64 {
 }
 
 fn tick_at_micros(file: &MidiFile, micros: u64) -> u64 {
-    let mut low = 0u64;
-    let mut high = file.total_ticks;
-
-    while low < high {
-        let mid = low + (high - low + 1) / 2;
-        if tick_to_micros_abs(mid, &file.tempo_map, file.ticks_per_beat) <= micros {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    low
+    file.tempo_clock.tick_at_micros(micros, file.total_ticks)
 }
