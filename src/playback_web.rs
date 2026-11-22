@@ -612,9 +612,10 @@ impl WebPlayback {
     }
 
     fn note_on(&mut self, note: u8, velocity: u8, channel: u8) {
+        let remote = crate::duet::send(&[0x90 | (channel & 0x0F), note, velocity]);
         if let Some(ref output) = self.midi_conn {
             let _ = output.send(&[0x90 | (channel & 0x0F), note, velocity]);
-        } else if let Some(ref synth) = self.synth {
+        } else if !remote && let Some(ref synth) = self.synth {
             if let Ok(mut synth) = synth.lock() {
                 synth.note_on(note, velocity, channel);
             }
@@ -622,9 +623,10 @@ impl WebPlayback {
     }
 
     fn note_off(&mut self, note: u8, channel: u8) {
+        let remote = crate::duet::send(&[0x80 | (channel & 0x0F), note, 0]);
         if let Some(ref output) = self.midi_conn {
             let _ = output.send(&[0x80 | (channel & 0x0F), note, 0]);
-        } else if let Some(ref synth) = self.synth {
+        } else if !remote && let Some(ref synth) = self.synth {
             if let Ok(mut synth) = synth.lock() {
                 synth.note_off(note, channel);
             }
@@ -632,6 +634,7 @@ impl WebPlayback {
     }
 
     fn all_notes_off(&mut self) {
+        crate::duet::all_notes_off();
         if let Some(ref output) = self.midi_conn {
             output.all_notes_off();
         }
