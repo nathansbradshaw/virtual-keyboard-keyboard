@@ -84,9 +84,24 @@ fn main() {
     // matching the key-sprite pipeline instead of embedding multi-megabyte PNGs.
     let texture_dir = output_dir.join("k2-textures");
     fs::create_dir_all(&texture_dir).expect("could not create texture output directory");
+    fs::create_dir_all(texture_dir.join("controls")).expect("could not create control texture directory");
+    let mut texture_manifest = String::from("const RUNTIME_TEXTURES: &[(&str, &[u8])] = &[\n");
     for name in [
         "wood-grain", "dark-panel-grain", "keyboard-clean-mask",
         "led-panel-board-crop", "panel-wear-overlay-runtime",
+        "controls/button-keycap-neutral-v3-runtime",
+        "controls/button-keycap-salmon-v3-runtime",
+        "controls/fader-cap-runtime",
+        "controls/horizontal-switch-off-runtime",
+        "controls/horizontal-switch-on-runtime",
+        "controls/led-jewel-unlit-runtime",
+        "controls/panel-screw-photo-runtime",
+        "controls/rocker-switch-off",
+        "controls/rocker-switch-on",
+        "controls/roller-selector-inline-photo-runtime",
+        "controls/rotary-knob-face-runtime",
+        "controls/track-label-plate-photo-runtime",
+        "controls/transport-keycap-photo-runtime",
     ] {
         let source = asset_dir.join(format!("{name}.png"));
         println!("cargo:rerun-if-changed={}", source.display());
@@ -97,7 +112,10 @@ fn main() {
             .encode(90.0);
         fs::write(texture_dir.join(format!("{name}.webp")), encoded.as_ref())
             .expect("could not write runtime texture");
+        texture_manifest.push_str(&format!("    (\"{name}\", include_bytes!(concat!(env!(\"OUT_DIR\"), \"/k2-textures/{name}.webp\"))),\n"));
     }
+    texture_manifest.push_str("];\n");
+    fs::write(output_dir.join("k2_runtime_textures.rs"), texture_manifest).expect("could not write texture manifest");
     let sprite_dir = output_dir.join("k2-key-sprites");
     fs::create_dir_all(&sprite_dir).expect("could not create key sprite output directory");
 
