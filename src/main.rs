@@ -61,6 +61,9 @@ mod boot {
         if let Some(el) = document.get_element_by_id("loading-screen") {
             let _ = el.class_list().add_1("hidden");
         }
+        if let Some(performance) = web_sys::window().and_then(|w| w.performance()) {
+            web_sys::console::info_1(&format!("K2 ready in {:.0} ms", performance.now()).into());
+        }
     }
 }
 
@@ -81,13 +84,13 @@ impl ChromeAssets {
     fn new() -> Self {
         Self {
             wood_grain: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/wood-grain.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/wood-grain.webp"))[..],
             ),
             dark_grain: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/dark-panel-grain.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/dark-panel-grain.webp"))[..],
             ),
             panel_wear: image::Handle::from_bytes(
-                &include_bytes!("../assets/keyboard/panel-wear-overlay-runtime.png")[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/k2-textures/panel-wear-overlay-runtime.webp"))[..],
             ),
         }
     }
@@ -2132,6 +2135,7 @@ fn midi_input_board_note(note: u8, input_octave: i8) -> (u8, bool) {
 
 struct App {
     window_size: Size,
+    first_frame_pending: bool,
     photo_assets: PhotoBoardAssets,
     chrome_assets: ChromeAssets,
     control_assets: ControlAssets,
@@ -2183,7 +2187,7 @@ struct App {
     live_channel: u8,
 
     // MIDI file
-    midi_file: Option<midi::MidiFile>,
+    midi_file: Option<Arc<midi::MidiFile>>,
     octave_offset: i8,
     pitch_step: i8,             // 1 = semitone, 12 = octave
     key_pick_mode: KeyPickMode, // which duplicate key to light when a note repeats across rows
@@ -2293,6 +2297,7 @@ impl Default for App {
 
         let mut app = App {
             window_size: Size::new(1520.0, 900.0),
+            first_frame_pending: cfg!(target_arch = "wasm32"),
             photo_assets: PhotoBoardAssets::new(),
             chrome_assets: ChromeAssets::new(),
             control_assets: ControlAssets::new(),
@@ -2400,6 +2405,7 @@ impl Default for App {
 #[derive(Debug, Clone)]
 pub enum Message {
     WindowResized(Size),
+    FirstFrame,
     // keyboard
     KeyPressed(KeyId),
     KeyReleased(KeyId),
@@ -3585,6 +3591,11 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::FirstFrame => {
+                self.first_frame_pending = false;
+                boot::notify_first_frame();
+                Task::none()
+            }
             Message::WindowResized(size) => {
                 self.window_size = size;
                 Task::none()
@@ -3721,6 +3732,7 @@ impl App {
                 Task::none()
             }
             Message::MidiLoaded(Ok(file)) => {
+                let file = Arc::new(file);
                 let (offset, covered, total) =
                     midi::best_octave_offset(&file, &self.keyboard_notes);
                 self.skipped_notes = total.saturating_sub(covered);
@@ -3739,6 +3751,9 @@ impl App {
 
                 // Drop any existing playback thread
                 self.playback_handle = None;
+                // Old native workers may still publish while shutting down;
+                // give each song its own queue so stale events cannot leak in.
+                self.playback_events = Arc::new(Mutex::new(VecDeque::new()));
 
                 // Spawn a new idle playback thread ready for this file
                 #[cfg(not(target_arch = "wasm32"))]
@@ -3746,7 +3761,7 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let conn = self.web_midi_output.clone();
                 let handle = playback::spawn(
-                    Arc::new(file.clone()),
+                    Arc::clone(&file),
                     Arc::clone(&self.playback_events),
                     Arc::clone(&self.audio_enabled),
                     self.track_muted.clone(),
@@ -3899,6 +3914,9 @@ impl App {
                     h.cmd_tx.send(PlayCmd::Pause).ok();
                     self.play_state = PlayState::Paused;
                 }
+                self.highlighted.clear();
+                self.active_highlight_keys.clear();
+                self.playback_events.lock().unwrap().clear();
                 Task::none()
             }
             Message::Stop => {
@@ -3909,6 +3927,7 @@ impl App {
                 self.position_tick = 0;
                 self.highlighted.clear();
                 self.active_highlight_keys.clear();
+                self.playback_events.lock().unwrap().clear();
                 Task::none()
             }
             Message::ToggleLooper => {
@@ -4228,9 +4247,9 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         #[cfg(not(target_arch = "wasm32"))]
-        let needs_poll = self.playback_handle.is_some();
+        let needs_poll = self.play_state == PlayState::Playing;
         #[cfg(target_arch = "wasm32")]
-        let needs_poll = self.playback_handle.is_some() || self.web_midi_access.is_some();
+        let needs_poll = self.play_state == PlayState::Playing || self.web_midi_access.is_some();
         let playback = if needs_poll {
             iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::PollPlayback)
         } else {
@@ -4248,6 +4267,11 @@ impl App {
 
         Subscription::batch([
             playback,
+            if self.first_frame_pending {
+                iced::window::frames().map(|_| Message::FirstFrame)
+            } else {
+                Subscription::none()
+            },
             resize,
             computer_keyboard,
             octave_shortcut,
@@ -4308,7 +4332,6 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        boot::notify_first_frame();
         let has_file = self.midi_file.is_some();
         let dense_desktop = self.window_size.width >= 1180.0;
         let (outer_pad, section_gap, panel_v, panel_h, row_gap, track_gap) =
@@ -5288,7 +5311,7 @@ impl App {
         // only the content drawn on its inner screen changes when a file loads.
         let staff_screen: Element<Message> = container(
             Canvas::new(StaffCanvas {
-                midi_file: self.midi_file.as_ref(),
+                midi_file: self.midi_file.as_deref(),
                 position_tick: self.position_tick,
                 track_muted: &self.track_muted,
                 octave_offset: self.octave_offset,

@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use js_sys::Uint8Array;
@@ -47,11 +47,17 @@ pub enum PlayEvent {
 #[derive(Clone)]
 pub struct CommandSender {
     commands: Arc<Mutex<VecDeque<PlayCmd>>>,
+    state: Weak<Mutex<WebPlayback>>,
 }
 
 impl CommandSender {
     pub fn send(&self, command: PlayCmd) -> Result<(), ()> {
         self.commands.lock().map_err(|_| ())?.push_back(command);
+        // Browser commands run on this same UI thread. Apply immediately so
+        // Stop, Seek, live keys and settings do not depend on an idle timer.
+        if let Some(state) = self.state.upgrade() {
+            state.lock().map_err(|_| ())?.apply_commands();
+        }
         Ok(())
     }
 }
@@ -67,6 +73,16 @@ impl PlaybackHandle {
     pub fn poll(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.poll();
+        }
+    }
+}
+
+impl Drop for PlaybackHandle {
+    fn drop(&mut self) {
+        // Replacing a song must release its synth and hardware notes even
+        // though that song will never receive another animation tick.
+        if let Ok(mut state) = self.state.lock() {
+            state.all_notes_off();
         }
     }
 }
@@ -299,7 +315,7 @@ pub fn spawn(
     }));
 
     PlaybackHandle {
-        cmd_tx: CommandSender { commands },
+        cmd_tx: CommandSender { commands, state: Arc::downgrade(&state) },
         state,
     }
 }

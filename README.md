@@ -42,6 +42,16 @@ trunk serve --release=false
 Then open <http://localhost:8080>. Browser audio starts after the first Play or
 keyboard interaction because Web Audio requires a user gesture.
 
+The browser release uses full-resolution WebP textures and reuses keyboard
+geometry between note changes. Stopped playback sleeps unless Web MIDI needs
+polling. Startup failures show a reload link instead of leaving a blank page.
+
+To compare staff note lookup against a full scan on a 100,000-note fixture:
+
+```sh
+cargo test measure_staff_note_lookup -- --ignored --nocapture
+```
+
 ## Brand assets
 
 The full-size logo is [`assets/k2-logo-v2.png`](assets/k2-logo-v2.png). Small

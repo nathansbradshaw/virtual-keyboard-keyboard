@@ -460,8 +460,7 @@ fn draw_staff(
         col:       Color,
     }
 
-    let mut plotted: Vec<Plotted> = f.notes.iter()
-        .filter(|note| !(note.start_tick > vis_end || note.end_tick < vis_start))
+    let mut plotted: Vec<Plotted> = f.notes_in_window(vis_start, vis_end)
         .filter(|note| !track_muted.get(note.track).copied().unwrap_or(false))
         .filter_map(|note| {
             let shift = crate::midi::combined_octave_shift(octave_offset, track_octave, note.track);
