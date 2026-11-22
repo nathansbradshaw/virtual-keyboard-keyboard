@@ -7,6 +7,18 @@ use web_sys::{HtmlIFrameElement, MessageEvent, Url, Window};
 
 const PHONE_URL: &str = "https://unitedcode.github.io/virtual-synthphone-e/";
 
+fn phone_url() -> &'static str {
+    let url = page();
+    if url.protocol() == "http:"
+        && matches!(url.hostname().as_str(), "127.0.0.1" | "localhost")
+        && url.search_params().get("phone").as_deref() == Some("local")
+    {
+        "http://127.0.0.1:3032/"
+    } else {
+        PHONE_URL
+    }
+}
+
 fn set(object: &JsValue, key: &str, value: impl Into<JsValue>) {
     let _ = Reflect::set(object, &key.into(), &value.into());
 }
@@ -194,11 +206,12 @@ pub fn start_shell() -> bool {
         .unwrap()
         .unchecked_into();
     k2.set_src(&url.href());
-    phone.set_src(PHONE_URL);
+    let phone_url = phone_url();
+    phone.set_src(phone_url);
     let back = document.get_element_by_id("back").unwrap();
     url.search_params().delete("instrument");
     let _ = back.set_attribute("href", &url.href());
-    let phone_origin = Url::new(PHONE_URL).expect("phone URL").origin();
+    let phone_origin = Url::new(phone_url).expect("phone URL").origin();
     let local_origin = page().origin();
     let status = document.get_element_by_id("pair-status").unwrap();
     let mut session = String::new();
