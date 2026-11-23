@@ -24,7 +24,8 @@
       name="description"
       content="Open a MIDI file and visualize it across a full computer keyboard."
     />
-    <title>K2 MIDI Viewer</title>
+    <title>Virtual Keyboard Keyboard</title>
+    <link rel="canonical" href="https://nathansbradshaw.github.io/virtual-keyboard-keyboard/" />
     <link
       data-trunk
       rel="rust"
@@ -102,10 +103,10 @@
     </style>
   </head>
   <body>
-    <noscript>K2 MIDI Viewer requires JavaScript and WebAssembly.</noscript>
+    <noscript>Virtual Keyboard Keyboard requires JavaScript and WebAssembly.</noscript>
     <div id="loading-screen">
       <div class="spinner"></div>
-      <div class="title">Loading K2 MIDI Viewer&hellip;</div>
+      <div class="title">Loading Virtual Keyboard Keyboard&hellip;</div>
       <a class="retry" href="">Reload viewer</a>
     </div>
     <script>
@@ -116,7 +117,7 @@
         if (el && !el.classList.contains("hidden")) {
           el.classList.add("failed");
           el.querySelector(".title").textContent =
-            "K2 could not finish starting. Please reload.";
+            "Virtual Keyboard Keyboard could not finish starting. Please reload.";
         }
       }
       window.addEventListener("unhandledrejection", showStartupFailure);

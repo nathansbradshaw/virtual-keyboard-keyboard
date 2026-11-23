@@ -73,7 +73,7 @@ mod boot {
             let _ = el.class_list().add_1("hidden");
         }
         if let Some(performance) = web_sys::window().and_then(|w| w.performance()) {
-            web_sys::console::info_1(&format!("K2 ready in {:.0} ms", performance.now()).into());
+            web_sys::console::info_1(&format!("Virtual Keyboard Keyboard ready in {:.0} ms", performance.now()).into());
         }
     }
 }
@@ -273,7 +273,7 @@ const WARM_BLACK_DEEP: Color = Color::from_rgb8(0x12, 0x0d, 0x08);
 
 fn app_theme() -> Theme {
     Theme::custom(
-        "K2".to_string(),
+        "Virtual Keyboard Keyboard".to_string(),
         iced::theme::Palette {
             background: APP_BG,
             text: TEXT_MAIN,
@@ -296,7 +296,7 @@ fn app_icon() -> iced::window::Icon {
         256,
         256,
     )
-    .expect("the embedded K2 app icon must be 256x256 RGBA")
+    .expect("the embedded app icon must be 256x256 RGBA")
 }
 
 /// Wraps `content` as a distinct hardware module: a solid charcoal base +
@@ -1903,7 +1903,7 @@ fn main() -> iced::Result {
     if duet::start_shell() { return Ok(()); }
 
     let app = iced::application(App::default, App::update, App::view)
-        .title("K2 MIDI Viewer")
+        .title("Virtual Keyboard Keyboard")
         .theme(app_theme_for)
         .font(include_bytes!("../assets/fonts/PermanentMarker-Regular.ttf").as_slice())
         .subscription(App::subscription);
@@ -4899,8 +4899,11 @@ impl App {
         // Brand stays intrinsic width — the LCD claims the header's leftover
         // space instead, so it reads as the row's dominant element.
         let identity = column![
-            text("K2").size(24).color(TEXT_MAIN),
-            text("KEYBOARD KEYBOARD / MIDI VIEWER")
+            text("VIRTUAL").size(10).color(TEXT_MUTED),
+            text("KEYBOARD KEYBOARD")
+                .size(20)
+                .color(TEXT_MAIN),
+            text("MIDI KEYBOARD & PLAYER")
                 .size(10)
                 .color(TEXT_MUTED),
         ]

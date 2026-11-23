@@ -192,7 +192,7 @@ pub fn start_shell() -> bool {
         return false;
     }
     let document = window().document().expect("document");
-    document.set_title("K2 + Synthphone E");
+    document.set_title("Virtual Keyboard Keyboard + Synthphone E");
     let Some(body) = document.body() else {
         return true;
     };
@@ -263,7 +263,7 @@ pub fn start_shell() -> bool {
             if kind == "disconnect" {
                 last_ready = 0.0;
                 status
-                    .set_text_content(Some("K2 synth selected. Reconnect with SYNTHPHONE in K2."));
+                    .set_text_content(Some("Keyboard synth selected. Reconnect with its SYNTHPHONE button."));
             }
         } else if event.origin() == phone_origin
             && phone
@@ -281,7 +281,7 @@ pub fn start_shell() -> bool {
             if let Some(target) = k2.content_window() {
                 let _ = target.post_message(&data, &local_origin);
             }
-            status.set_text_content(Some("Connected · K2 MIDI is playing the phone"));
+            status.set_text_content(Some("Connected · Virtual Keyboard Keyboard is playing the phone"));
         }
     }) as Box<dyn FnMut(MessageEvent)>);
     let _ = window().add_event_listener_with_callback("message", relay.as_ref().unchecked_ref());
