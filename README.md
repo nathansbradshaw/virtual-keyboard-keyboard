@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="assets/k2-logo-v2.png" alt="K2 MIDI Viewer logo" width="160" />
+  <img src="assets/k2-logo-v2.png" alt="Virtual Keyboard Keyboard logo" width="160" />
 </p>
 
-# K2 MIDI Viewer
+# Virtual Keyboard Keyboard
+
+[Open Virtual Keyboard Keyboard](https://nathansbradshaw.github.io/virtual-keyboard-keyboard/)
 
 <a href="https://0rwx.com/">
   <picture>
@@ -11,7 +13,7 @@
   </picture>
 </a>
 
-K2—short for “keyboard squared”—renders MIDI files across a full
+Virtual Keyboard Keyboard (formerly K2 MIDI Viewer) renders MIDI files across a full
 computer-keyboard layout with transport, track muting, pitch controls, staff
 notation, and a built-in soft synth.
 
@@ -101,19 +103,19 @@ Firefox for Android does not support Web MIDI.
 ## Play with Synthphone E
 
 Click **Play with Synthphone** to open both instruments together, or open the
-[paired view](https://nathansbradshaw.github.io/k2-midi-viewer/?duet=1).
+[paired view](https://nathansbradshaw.github.io/virtual-keyboard-keyboard/?duet=1).
 
-1. **Power on** the phone. K2 shows **SYNTHPHONE: ON** once it connects.
-2. Play K2's keys or load a MIDI file in K2. Its transport, track mutes,
+1. **Power on** the phone. The keyboard shows **SYNTHPHONE: ON** once it connects.
+2. Play the keyboard's keys or load a MIDI file. Its transport, track mutes,
    channel controls and octave settings now drive the phone.
 3. For vocals, enable **MIC** on the phone and lift its receiver. Its screen,
    keypad, dials and vocal effects remain independently playable.
 
 Channels keep the real phone's meanings: **2 = synth**, **1 = vocal control**,
-**10 = drums**. K2's live keys default to channel 2. For a MIDI file whose
+**10 = drums**. The keyboard's live keys default to channel 2. For a MIDI file whose
 melody is on channel 1, set that track's **CH** to **2** to hear its synth.
 
-K2's local synth stays silent while Synthphone is selected. Click the
+The keyboard's local synth stays silent while Synthphone is selected. Click the
 **SYNTHPHONE** button to switch back; playback pauses during the switch.
 Hardware MIDI output remains independent. No Web MIDI permission or virtual
 MIDI driver is needed for the app-to-app connection. Microphone permission is
@@ -155,3 +157,9 @@ LTO-optimized WebAssembly release with the repository subpath as its public URL,
 and deploys the `dist` artifact through GitHub Pages. In the repository's GitHub
 settings, set **Pages → Source** to **GitHub Actions** once before the first
 deployment.
+
+The former [K2 address](https://nathansbradshaw.github.io/k2-midi-viewer/)
+redirects to the new site, preserving URL settings and fragments. The small
+redirect site lives in the `nathansbradshaw/k2-midi-viewer` repository; its
+`index.html` and `404.html` both use [`legacy-site/index.html`](legacy-site/index.html).
+The application and its history live in `nathansbradshaw/virtual-keyboard-keyboard`.
